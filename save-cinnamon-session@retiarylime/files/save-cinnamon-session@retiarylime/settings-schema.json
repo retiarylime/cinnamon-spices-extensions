@@ -1,0 +1,62 @@
+{
+    "section-general": {
+        "type": "section",
+        "description": "General Settings"
+    },
+
+    "auto-save-logout": {
+        "type": "checkbox",
+        "description": "Auto-save session on logout/shutdown",
+        "default": true,
+        "tooltip": "Automatically save the current session when logging out or shutting down"
+    },
+
+    "auto-restore-login": {
+        "type": "checkbox",
+        "description": "Auto-restore session on login",
+        "default": true,
+        "tooltip": "Automatically restore the saved session when logging in"
+    },
+
+    "restore-delay": {
+        "type": "scale",
+        "description": "Restore delay",
+        "min": 1000,
+        "max": 30000,
+        "default": 3000,
+        "step": 1000,
+        "units": "ms",
+        "tooltip": "Delay before restoring session to allow desktop to fully load"
+    },
+
+    "section-apps": {
+        "type": "section",
+        "description": "Application Settings"
+    },
+
+    "excluded-apps": {
+        "type": "entry",
+        "description": "Excluded applications",
+        "default": "cinnamon-settings,cinnamon-killer-daemon,nemo-desktop",
+        "tooltip": "Comma-separated list of applications to exclude from session saving (case-insensitive partial matching)"
+    },
+
+    "section-keybindings": {
+        "type": "section",
+        "description": "Keyboard Shortcuts"
+    },
+
+    "manual-save-keybinding": {
+        "type": "keybinding",
+        "description": "Manual save session",
+        "default": "<Super><Shift>s",
+        "tooltip": "Keyboard shortcut to manually save the current session"
+    },
+
+    "manual-restore-keybinding": {
+        "type": "keybinding",
+        "description": "Manual restore session",
+        "default": "<Super><Shift>r",
+        "tooltip": "Keyboard shortcut to manually restore the saved session"
+    }
+}

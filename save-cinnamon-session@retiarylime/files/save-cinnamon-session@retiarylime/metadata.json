@@ -1,0 +1,21 @@
+{
+    "uuid": "save-cinnamon-session@retiarylime",
+    "name": "Save Cinnamon Session",
+    "description": "Automatically save window positions and applications on logout/shutdown and restore them on login to maintain your workspace state across sessions.",
+    "version": "1.0.0",
+    "cinnamon-version": [
+        "4.0",
+        "4.2",
+        "4.4",
+        "4.6",
+        "4.8",
+        "5.0",
+        "5.2",
+        "5.4",
+        "5.6",
+        "5.8",
+        "6.0",
+        "6.2"
+    ],
+    "url": "https://github.com/retiarylime/save-cinnamon-session"
+}
