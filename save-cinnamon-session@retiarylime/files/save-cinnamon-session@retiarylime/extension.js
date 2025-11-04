@@ -693,14 +693,17 @@ Terminal=false`;
                 execPath: execPath
             };
             
-            // Create a unique key for duplicate detection
-            let windowKey = app + "|" + windowData.title + "|" + frame.x + "|" + frame.y + "|" + frame.width + "|" + frame.height;
+            // Create a unique key for duplicate detection - use PID and window handle for better uniqueness
+            let windowHandle = window.get_stable_sequence ? window.get_stable_sequence() : window.get_id();
+            let windowKey = app + "|" + windowData.title + "|" + pid + "|" + windowHandle;
             
             if (seenWindows.has(windowKey)) {
-                global.log("[" + UUID + "] Skipping duplicate window: " + app + " (" + windowData.title + ")");
+                global.log("[" + UUID + "] Skipping duplicate window: " + app + " (" + windowData.title + ") - Key: " + windowKey);
                 continue;
             }
             seenWindows.add(windowKey);
+            
+            global.log("[" + UUID + "] Adding unique window: " + app + " - Key: " + windowKey);
             
             sessionData.windows.push(windowData);
             
@@ -837,7 +840,10 @@ Terminal=false`;
             try {
                 // For applications that support multiple windows, we need to launch them multiple times
                 // or use specific launch parameters
+                global.log("[" + UUID + "] About to call _launchApplicationWindow for: " + windowData.app);
                 let launched = this._launchApplicationWindow(windowData);
+                global.log("[" + UUID + "] _launchApplicationWindow returned: " + launched + " for: " + windowData.app);
+                
                 if (launched) {
                     restoredWindows.add(windowId);
                     restoredCount++;
@@ -848,6 +854,7 @@ Terminal=false`;
                 }
             } catch (e) {
                 global.log("[" + UUID + "] Exception launching window: " + windowData.app + " - " + e);
+                global.log("[" + UUID + "] Exception stack: " + e.stack);
             }
             
             // Add delay between window launches to avoid overwhelming the system
@@ -867,6 +874,12 @@ Terminal=false`;
         });
         
         global.log("[" + UUID + "] Launched " + restoredCount + " windows, positioning in " + positioningDelay + "ms");
+    },
+
+    // Manual restore function for testing
+    _manualRestore: function() {
+        global.log("[" + UUID + "] Manual restore triggered");
+        this._restoreSession();
     },
     
     _isApplicationRunning: function(appName) {
@@ -1013,7 +1026,8 @@ Terminal=false`;
         let launched = false;
         let app = windowData.app;
         
-        global.log("[" + UUID + "] Attempting to launch window: " + app + " (" + windowData.title + ")");
+        global.log("[" + UUID + "] Attempting to launch application: " + app);
+        global.log("[" + UUID + "] Window details: title='" + windowData.title + "', wmClass='" + windowData.wmClass + "'");
         
         // Special handling for applications that support specific window opening
         if (app === "org.Nemo" || app === "Nemo") {
@@ -1034,13 +1048,16 @@ Terminal=false`;
             }
         } else if (app === "Code") {
             // For VS Code, try to open with workspace or file
+            global.log("[" + UUID + "] Entering VS Code launch section");
             try {
                 let workspace = this._extractWorkspaceFromTitle(windowData.title);
                 if (workspace) {
+                    global.log("[" + UUID + "] Launching VS Code with workspace: " + workspace);
                     Util.spawn_command_line_async('code "' + workspace + '"');
                     launched = true;
                     global.log("[" + UUID + "] Launched VS Code with workspace: " + workspace);
                 } else {
+                    global.log("[" + UUID + "] Launching VS Code with new window");
                     Util.spawn_command_line_async('code');
                     launched = true;
                     global.log("[" + UUID + "] Launched VS Code (new window)");
@@ -1050,12 +1067,16 @@ Terminal=false`;
             }
         } else if (app === "Terminator") {
             // For terminal, open new window
+            global.log("[" + UUID + "] Entering Terminator launch section");
             try {
+                global.log("[" + UUID + "] Attempting terminator --new-tab command");
                 Util.spawn_command_line_async('terminator --new-tab');
                 launched = true;
                 global.log("[" + UUID + "] Launched Terminator (new window)");
             } catch (e) {
+                global.log("[" + UUID + "] First terminator command failed: " + e);
                 try {
+                    global.log("[" + UUID + "] Attempting fallback terminator command");
                     Util.spawn_command_line_async('terminator');
                     launched = true;
                     global.log("[" + UUID + "] Launched Terminator (fallback)");
@@ -1078,11 +1099,37 @@ Terminal=false`;
                     global.log("[" + UUID + "] Failed to launch Firefox: " + e2);
                 }
             }
+        } else if (app === "Brave-browser" || app === "brave-browser") {
+            // For Brave browser, open new window
+            global.log("[" + UUID + "] Entering Brave browser launch section");
+            try {
+                global.log("[" + UUID + "] Attempting brave-browser --new-window command");
+                Util.spawn_command_line_async('brave-browser --new-window');
+                launched = true;
+                global.log("[" + UUID + "] Launched Brave (new window)");
+            } catch (e) {
+                global.log("[" + UUID + "] First brave command failed: " + e);
+                try {
+                    global.log("[" + UUID + "] Attempting fallback brave-browser command");
+                    Util.spawn_command_line_async('brave-browser');
+                    launched = true;
+                    global.log("[" + UUID + "] Launched Brave (fallback)");
+                } catch (e2) {
+                    global.log("[" + UUID + "] Failed to launch Brave: " + e2);
+                }
+            }
         } else {
             // For other applications, use the general launch method
+            global.log("[" + UUID + "] Using general launch method for: " + app);
             launched = this._launchApplication(app);
+            if (launched) {
+                global.log("[" + UUID + "] General launch successful for: " + app);
+            } else {
+                global.log("[" + UUID + "] General launch failed for: " + app);
+            }
         }
         
+        global.log("[" + UUID + "] Launch result for " + app + ": " + (launched ? "SUCCESS" : "FAILED"));
         return launched;
     },
     
