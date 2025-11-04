@@ -58,5 +58,17 @@
         "description": "Manual restore session",
         "default": "<Super><Shift>r",
         "tooltip": "Keyboard shortcut to manually restore the saved session"
+    },
+
+    "section-advanced": {
+        "type": "section",
+        "description": "Advanced Settings"
+    },
+
+    "debug-mode": {
+        "type": "checkbox",
+        "description": "Enable debug notifications",
+        "default": false,
+        "tooltip": "Show detailed notifications for session save/restore operations"
     }
 }

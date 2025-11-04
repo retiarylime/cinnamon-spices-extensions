@@ -14,6 +14,8 @@ const Gio = imports.gi.Gio;
 const GLib = imports.gi.GLib;
 const Util = imports.misc.util;
 const Mainloop = imports.mainloop;
+const MessageTray = imports.ui.messageTray;
+const St = imports.gi.St;
 
 let extension = null;
 
@@ -27,6 +29,7 @@ SaveCinnamonSessionExtension.prototype = {
         this._signals = new SignalManager.SignalManager(null);
         this._saveTimeout = null;
         this._restoreTimeout = null;
+        this._autoSaveId = null;
         this._sessionFile = GLib.get_home_dir() + "/.cinnamon-session-save.json";
         
         // Set default values first
@@ -36,6 +39,7 @@ SaveCinnamonSessionExtension.prototype = {
         this.excludedApps = "cinnamon-settings,cinnamon-killer-daemon,nemo-desktop";
         this.manualSaveKeybinding = "<Super><Shift>s";
         this.manualRestoreKeybinding = "<Super><Shift>r";
+        this.debugMode = false;
         
         // Settings - try to bind with error handling
         try {
@@ -46,6 +50,7 @@ SaveCinnamonSessionExtension.prototype = {
             this.settings.bind("excluded-apps", "excludedApps", this._onSettingsChanged);
             this.settings.bind("manual-save-keybinding", "manualSaveKeybinding", this._onKeybindingChanged);
             this.settings.bind("manual-restore-keybinding", "manualRestoreKeybinding", this._onKeybindingChanged);
+            this.settings.bind("debug-mode", "debugMode", this._onSettingsChanged);
         } catch (e) {
             global.log("[" + UUID + "] Settings binding failed, using defaults: " + e);
         }
@@ -86,6 +91,10 @@ SaveCinnamonSessionExtension.prototype = {
             Mainloop.source_remove(this._restoreTimeout);
             this._restoreTimeout = null;
         }
+        if (this._autoSaveId) {
+            Mainloop.source_remove(this._autoSaveId);
+            this._autoSaveId = null;
+        }
         
         // Clean up keybindings
         this._cleanupKeybindings();
@@ -116,11 +125,20 @@ SaveCinnamonSessionExtension.prototype = {
     _connectSessionSignals: function() {
         // Connect to Cinnamon's session manager signals
         try {
-            // Monitor for session end signals
-            this._signals.connect(Main.sessionMode, 'updated', this._onSessionModeChanged, this);
+            // Monitor for session end signals - use a more reliable approach
+            // Save session when the main loop is about to exit
+            this._signals.connect(global, 'shutdown', this._onShutdown, this);
             
-            // Monitor for application quit events that might indicate logout
+            // Also monitor for window close events that might indicate logout preparation
             this._signals.connect(global.display, 'window-created', this._onWindowCreated, this);
+            
+            // Set up a periodic auto-save as fallback
+            this._autoSaveId = Mainloop.timeout_add_seconds(300, () => { // Every 5 minutes
+                if (this.autoSaveOnLogout) {
+                    this._saveSession();
+                }
+                return true; // Keep repeating
+            });
             
             global.log("[" + UUID + "] Connected to session signals");
         } catch (e) {
@@ -128,11 +146,11 @@ SaveCinnamonSessionExtension.prototype = {
         }
     },
     
-    _onSessionModeChanged: function() {
-        // Save session when session mode changes (could indicate logout)
+    _onShutdown: function() {
+        // Save session on shutdown
         if (this.autoSaveOnLogout) {
-            global.log("[" + UUID + "] Session mode changed, scheduling save");
-            this._scheduleSave();
+            global.log("[" + UUID + "] Shutdown detected, saving session");
+            this._saveSession();
         }
     },
     
@@ -194,14 +212,21 @@ SaveCinnamonSessionExtension.prototype = {
             // Write session data to file
             let file = Gio.File.new_for_path(this._sessionFile);
             let stream = file.replace(null, false, Gio.FileCreateFlags.NONE, null);
-            stream.write(jsonData, null);
+            let bytes = new GLib.Bytes(jsonData);
+            stream.write_bytes(bytes, null);
             stream.close(null);
             
             global.log("[" + UUID + "] Session saved successfully to " + this._sessionFile);
             global.log("[" + UUID + "] Saved " + sessionData.windows.length + " windows across " + 
                        Object.keys(sessionData.workspaces).length + " workspaces");
+            
+            // Show notification
+            this._showNotification("Session Saved", 
+                "Saved " + sessionData.windows.length + " windows across " + 
+                Object.keys(sessionData.workspaces).length + " workspaces");
         } catch (e) {
             global.logError("[" + UUID + "] Failed to save session: " + e);
+            this._showNotification("Session Save Failed", "Error: " + e.message);
         }
     },
     
@@ -279,11 +304,16 @@ SaveCinnamonSessionExtension.prototype = {
             global.log("[" + UUID + "] Restoring session from " + new Date(sessionData.timestamp));
             global.log("[" + UUID + "] Restoring " + sessionData.windows.length + " windows");
             
+            // Show notification
+            this._showNotification("Restoring Session", 
+                "Restoring " + sessionData.windows.length + " windows...");
+            
             // Restore applications and windows
             this._restoreApplications(sessionData);
             
         } catch (e) {
             global.logError("[" + UUID + "] Failed to restore session: " + e);
+            this._showNotification("Session Restore Failed", "Error: " + e.message);
         }
     },
     
@@ -304,19 +334,64 @@ SaveCinnamonSessionExtension.prototype = {
             if (restoredApps.has(app)) continue;
             
             try {
-                // Try to launch the application
-                Util.spawn_async([app], null);
-                restoredApps.add(app);
-                global.log("[" + UUID + "] Launched application: " + app);
-            } catch (e) {
-                // Try alternative launch methods
-                try {
-                    Util.spawn_command_line_async(app);
-                    restoredApps.add(app);
-                    global.log("[" + UUID + "] Launched application (alternative): " + app);
-                } catch (e2) {
-                    global.log("[" + UUID + "] Failed to launch application: " + app + " - " + e2);
+                // Try multiple launch methods for better compatibility
+                let launched = false;
+                
+                // Method 1: Try desktop file if it looks like an app ID
+                if (app.includes('.') && !app.includes('/')) {
+                    try {
+                        Util.spawn_command_line_async('gtk-launch ' + app);
+                        launched = true;
+                        global.log("[" + UUID + "] Launched via gtk-launch: " + app);
+                    } catch (e) {
+                        // Continue to next method
+                    }
                 }
+                
+                // Method 2: Try direct command
+                if (!launched) {
+                    try {
+                        Util.spawn_command_line_async(app);
+                        launched = true;
+                        global.log("[" + UUID + "] Launched via command line: " + app);
+                    } catch (e) {
+                        // Continue to next method
+                    }
+                }
+                
+                // Method 3: Try spawn_async
+                if (!launched) {
+                    try {
+                        Util.spawn_async([app], null);
+                        launched = true;
+                        global.log("[" + UUID + "] Launched via spawn_async: " + app);
+                    } catch (e) {
+                        // Continue to next method
+                    }
+                }
+                
+                // Method 4: Try with 'which' to find executable
+                if (!launched) {
+                    try {
+                        let [success, out] = GLib.spawn_command_line_sync('which ' + app);
+                        if (success && out.length > 0) {
+                            let execPath = out.toString().trim();
+                            Util.spawn_async([execPath], null);
+                            launched = true;
+                            global.log("[" + UUID + "] Launched via which: " + execPath);
+                        }
+                    } catch (e) {
+                        // All methods failed
+                    }
+                }
+                
+                if (launched) {
+                    restoredApps.add(app);
+                } else {
+                    global.log("[" + UUID + "] Failed to launch application: " + app);
+                }
+            } catch (e) {
+                global.log("[" + UUID + "] Exception launching application: " + app + " - " + e);
             }
         }
         
@@ -370,12 +445,35 @@ SaveCinnamonSessionExtension.prototype = {
         
         global.log("[" + UUID + "] Positioned " + positionedCount + " windows");
         
+        // Show notification
+        this._showNotification("Session Restored", 
+            "Restored " + positionedCount + " windows from saved session");
+        
         // Restore active workspace
         if (sessionData.currentWorkspace !== undefined) {
             let workspace = global.workspace_manager.get_workspace_by_index(sessionData.currentWorkspace);
             if (workspace) {
                 workspace.activate(global.get_current_time());
             }
+        }
+    },
+    
+    _showNotification: function(title, message) {
+        try {
+            // Only show notifications in debug mode or for important events
+            if (this.debugMode || title.includes("Failed") || title.includes("Error")) {
+                let source = new MessageTray.Source("Save Cinnamon Session");
+                let notification = new MessageTray.Notification(source, title, message);
+                
+                // Set a shorter timeout for non-critical notifications
+                notification.setTransient(true);
+                
+                Main.messageTray.add(source);
+                source.notify(notification);
+            }
+        } catch (e) {
+            // If notification fails, just log it
+            global.log("[" + UUID + "] Notification: " + title + " - " + message);
         }
     }
 };
