@@ -33,6 +33,7 @@ SaveCinnamonSessionExtension.prototype = {
         this._autoSaveId = null;
         this._sessionFile = GLib.get_home_dir() + "/.cinnamon-session-save.json";
         this._logoutDetected = false;
+    this._restoring = false; // flag to avoid overwriting saved session during startup restore
         
         // Set default values first
         this.autoSaveOnLogout = true;
@@ -63,6 +64,8 @@ SaveCinnamonSessionExtension.prototype = {
     
     enable: function() {
         global.log("[" + UUID + "] Enabling extension");
+        // Mark that we are in startup restore phase to avoid auto-saving and overwriting
+        this._restoring = true;
         
         // Connect to session management signals
         this._connectSessionSignals();
@@ -70,7 +73,7 @@ SaveCinnamonSessionExtension.prototype = {
         // Set up keybindings
         this._setupKeybindings();
         
-        // Perform an initial save to ensure we have baseline session data
+        // Schedule an initial save, but _saveSession will skip writes while this._restoring is true
         Mainloop.timeout_add(3000, () => {
             this._saveSession();
             return false;
@@ -101,7 +104,7 @@ SaveCinnamonSessionExtension.prototype = {
             { delay: 25000, name: "Final restore" }      // 25 seconds - final safety net
         ];
         
-        global.log("[" + UUID + "] Scheduling " + restoreAttempts.length + " restoration attempts");
+    global.log("[" + UUID + "] Scheduling " + restoreAttempts.length + " restoration attempts");
         
         for (let i = 0; i < restoreAttempts.length; i++) {
             let attempt = restoreAttempts[i];
@@ -114,6 +117,14 @@ SaveCinnamonSessionExtension.prototype = {
         
         // Also create a startup script as backup
         this._createStartupScript();
+
+        // Clear the restoring flag shortly after the last scheduled attempt so future auto-saves can proceed
+        let lastDelay = restoreAttempts[restoreAttempts.length - 1].delay;
+        Mainloop.timeout_add(lastDelay + 3000, () => {
+            this._restoring = false;
+            global.log("[" + UUID + "] Restore phase complete - auto-saves will resume");
+            return false;
+        });
     },
     
     _createStartupScript: function() {
@@ -524,8 +535,37 @@ Terminal=false`;
     
     _saveSession: function() {
         try {
+            // If we are in the startup restoring phase, avoid overwriting an existing valid session
+            // This prevents startup auto-saves (when few/no windows exist yet) from wiping the
+            // session that we are trying to restore.
+            if (this._restoring && GLib.file_test(this._sessionFile, GLib.FileTest.EXISTS) && !this._logoutDetected) {
+                global.log("[" + UUID + "] Skipping save during restore phase to avoid overwriting saved session");
+                return;
+            }
             let sessionData = this._collectSessionData();
             let jsonData = JSON.stringify(sessionData, null, 2);
+            // If our collected session is empty but an existing saved session contains windows,
+            // avoid overwriting it with an empty file. This protects the saved logout state from
+            // being clobbered by an early startup auto-save.
+            if (sessionData.windows.length === 0 && GLib.file_test(this._sessionFile, GLib.FileTest.EXISTS)) {
+                try {
+                    let existingFile = Gio.File.new_for_path(this._sessionFile);
+                    let [ok, existingContents] = existingFile.load_contents(null);
+                    if (ok) {
+                        try {
+                            let existingData = JSON.parse(existingContents);
+                            if (existingData.windows && Array.isArray(existingData.windows) && existingData.windows.length > 0) {
+                                global.log("[" + UUID + "] Detected existing saved session with windows; skipping overwrite with empty session");
+                                return;
+                            }
+                        } catch (e) {
+                            // If parsing fails, fall through and overwrite (safer to refresh)
+                        }
+                    }
+                } catch (e) {
+                    // ignore errors reading existing file
+                }
+            }
             
             // Write session data to file
             let file = Gio.File.new_for_path(this._sessionFile);
