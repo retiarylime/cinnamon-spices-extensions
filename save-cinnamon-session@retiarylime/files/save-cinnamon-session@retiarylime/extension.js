@@ -605,18 +605,33 @@ Terminal=false`;
         
         let windows = global.get_window_actors();
         let excludedAppsArray = this.excludedApps.split(',').map(app => app.trim().toLowerCase());
+        let seenWindows = new Set(); // Track windows to avoid duplicates
         
         global.log("[" + UUID + "] Collecting session data from " + windows.length + " window actors");
         
         for (let windowActor of windows) {
             let window = windowActor.get_meta_window();
-            if (!window || window.is_skip_taskbar()) continue;
+            if (!window || window.is_skip_taskbar()) {
+                if (!window) {
+                    global.log("[" + UUID + "] Skipping null window");
+                } else if (window.is_skip_taskbar()) {
+                    global.log("[" + UUID + "] Skipping taskbar-skipped window: " + (window.get_title() || "no title"));
+                }
+                continue;
+            }
             
-            // Get application information - try multiple methods
-            let app = window.get_gtk_application_id() || 
-                     window.get_wm_class() || 
-                     window.get_wm_class_instance() ||
-                     window.get_title();
+            // Get application information - try multiple methods with detailed logging
+            let gtkAppId = window.get_gtk_application_id();
+            let wmClass = window.get_wm_class();
+            let wmClassInstance = window.get_wm_class_instance();
+            let title = window.get_title();
+            
+            global.log("[" + UUID + "] Examining window - gtk_app_id: '" + (gtkAppId || "none") + 
+                      "', wm_class: '" + (wmClass || "none") + 
+                      "', wm_class_instance: '" + (wmClassInstance || "none") + 
+                      "', title: '" + (title || "none") + "'");
+            
+            let app = gtkAppId || wmClass || wmClassInstance || title;
             
             if (!app) {
                 global.log("[" + UUID + "] Skipping window with no identifiable app");
@@ -626,11 +641,11 @@ Terminal=false`;
             // Skip excluded applications - be more lenient with exclusions
             let shouldExclude = excludedAppsArray.some(excluded => {
                 return app.toLowerCase().includes(excluded) || 
-                       window.get_title().toLowerCase().includes(excluded);
+                       title.toLowerCase().includes(excluded);
             });
             
             if (shouldExclude) {
-                global.log("[" + UUID + "] Excluding application: " + app);
+                global.log("[" + UUID + "] Excluding application: " + app + " (title: " + title + ")");
                 continue;
             }
             
@@ -678,6 +693,15 @@ Terminal=false`;
                 execPath: execPath
             };
             
+            // Create a unique key for duplicate detection
+            let windowKey = app + "|" + windowData.title + "|" + frame.x + "|" + frame.y + "|" + frame.width + "|" + frame.height;
+            
+            if (seenWindows.has(windowKey)) {
+                global.log("[" + UUID + "] Skipping duplicate window: " + app + " (" + windowData.title + ")");
+                continue;
+            }
+            seenWindows.add(windowKey);
+            
             sessionData.windows.push(windowData);
             
             // Track workspace usage
@@ -689,7 +713,10 @@ Terminal=false`;
             }
             sessionData.workspaces[workspaceIndex].windowCount++;
             
-            global.log("[" + UUID + "] Captured window: " + app + " (" + windowData.title + ") on workspace " + workspaceIndex);
+            global.log("[" + UUID + "] Captured window: app='" + app + "', title='" + windowData.title + 
+                      "', wmClass='" + (windowData.wmClass || "none") + 
+                      "', execPath='" + (windowData.execPath || "none") + 
+                      "' on workspace " + workspaceIndex);
         }
         
         global.log("[" + UUID + "] Session data collected: " + sessionData.windows.length + " windows, " + Object.keys(sessionData.workspaces).length + " workspaces");
