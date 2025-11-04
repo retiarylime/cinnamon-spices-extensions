@@ -656,11 +656,22 @@ Terminal=false`;
                 return;
             }
             
+            global.log("[" + UUID + "] DEBUG: Session file read successfully, size: " + contents.length + " bytes");
+            global.log("[" + UUID + "] DEBUG: First 200 chars: " + contents.toString().substring(0, 200));
+            
             let sessionData = JSON.parse(contents);
+            
+            global.log("[" + UUID + "] DEBUG: Session data loaded");
+            global.log("[" + UUID + "] DEBUG: sessionData.windows exists: " + (sessionData.windows ? "yes" : "no"));
+            global.log("[" + UUID + "] DEBUG: sessionData.windows is array: " + Array.isArray(sessionData.windows));
+            global.log("[" + UUID + "] DEBUG: sessionData.windows.length: " + (sessionData.windows ? sessionData.windows.length : "undefined"));
             
             // Validate session data
             if (!sessionData.windows || !Array.isArray(sessionData.windows) || sessionData.windows.length === 0) {
                 global.log("[" + UUID + "] Session file contains no valid windows to restore");
+                global.log("[" + UUID + "] DEBUG: Validation failed - windows: " + (sessionData.windows ? "exists" : "missing") + 
+                          ", isArray: " + Array.isArray(sessionData.windows) + 
+                          ", length: " + (sessionData.windows ? sessionData.windows.length : "undefined"));
                 return;
             }
             
@@ -705,22 +716,17 @@ Terminal=false`;
         
         global.log("[" + UUID + "] Attempting to restore " + Object.keys(appWindows).length + " applications");
         
-        // Launch applications with enhanced detection
+        // Launch applications - during session restore, prioritize launching over detection
         for (let app in appWindows) {
             if (restoredApps.has(app)) continue;
             
-            // Skip if application is already running
-            let isAlreadyRunning = this._isApplicationRunning(app);
-            if (isAlreadyRunning) {
-                global.log("[" + UUID + "] Application already running: " + app);
-                restoredApps.add(app);
-                continue;
-            }
+            global.log("[" + UUID + "] Launching application: " + app + " (" + appWindows[app].length + " windows expected)");
             
             try {
                 let launched = this._launchApplication(app);
                 if (launched) {
                     restoredApps.add(app);
+                    global.log("[" + UUID + "] Successfully launched: " + app);
                 } else {
                     global.log("[" + UUID + "] Failed to launch application: " + app);
                 }
@@ -754,6 +760,24 @@ Terminal=false`;
             }
         }
         return false;
+    },
+    
+    _countApplicationWindows: function(appName) {
+        let count = 0;
+        let windows = global.get_window_actors();
+        for (let windowActor of windows) {
+            let window = windowActor.get_meta_window();
+            if (!window) continue;
+            
+            let app = window.get_gtk_application_id() || 
+                     window.get_wm_class() || 
+                     window.get_wm_class_instance();
+            
+            if (app === appName) {
+                count++;
+            }
+        }
+        return count;
     },
     
     _launchApplication: function(app) {
