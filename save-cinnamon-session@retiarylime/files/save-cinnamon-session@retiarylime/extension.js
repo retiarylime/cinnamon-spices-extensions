@@ -33,9 +33,9 @@ SaveCinnamonSessionExtension.prototype = {
         this._autoSaveId = null;
         this._sessionFile = GLib.get_home_dir() + "/.cinnamon-session-save.json";
         this._logoutDetected = false;
-    this._restoring = false; // flag to avoid overwriting saved session during startup restore
-        
-        // Set default values first
+        this._restoring = false; // flag to avoid overwriting saved session during startup restore
+        this._restorationInProgress = false; // prevent concurrent restoration attempts
+        this._restoredAppsThisSession = new Set(); // track apps restored in this login session        // Set default values first
         this.autoSaveOnLogout = true;
         this.autoRestoreOnLogin = true;
         this.restoreDelay = 5000; // 5 seconds delay before restoring
@@ -110,13 +110,20 @@ SaveCinnamonSessionExtension.prototype = {
             let attempt = restoreAttempts[i];
             Mainloop.timeout_add(attempt.delay, () => {
                 global.log("[" + UUID + "] *** " + attempt.name.toUpperCase() + " ATTEMPT at " + attempt.delay + "ms ***");
+                
+                // Skip if restoration is already in progress
+                if (this._restorationInProgress) {
+                    global.log("[" + UUID + "] Skipping " + attempt.name + " - restoration already in progress");
+                    return false;
+                }
+                
                 this._restoreSession();
                 return false;
             });
         }
         
-        // Also create a startup script as backup
-        this._createStartupScript();
+        // Also create a startup script as backup (disabled to prevent duplicates)
+        // this._createStartupScript();
 
         // Clear the restoring flag shortly after the last scheduled attempt so future auto-saves can proceed
         let lastDelay = restoreAttempts[restoreAttempts.length - 1].delay;
@@ -628,7 +635,15 @@ Terminal=false`;
             }
             
             let frame = window.get_frame_rect();
-            let workspaceIndex = window.get_workspace().index();
+            let workspace = window.get_workspace();
+            
+            // Skip windows without valid workspace (e.g., being destroyed)
+            if (!workspace) {
+                global.log("[" + UUID + "] Skipping window with null workspace: " + app);
+                continue;
+            }
+            
+            let workspaceIndex = workspace.index();
             
             // Get additional window information
             let pid = window.get_pid();
@@ -683,8 +698,16 @@ Terminal=false`;
     
     _restoreSession: function() {
         try {
+            // Set restoration lock to prevent concurrent attempts
+            if (this._restorationInProgress) {
+                global.log("[" + UUID + "] Restoration already in progress, skipping");
+                return;
+            }
+            this._restorationInProgress = true;
+            
             if (!GLib.file_test(this._sessionFile, GLib.FileTest.EXISTS)) {
                 global.log("[" + UUID + "] No session file found to restore");
+                this._restorationInProgress = false;
                 return;
             }
             
@@ -693,6 +716,7 @@ Terminal=false`;
             
             if (!success) {
                 global.logError("[" + UUID + "] Failed to read session file");
+                this._restorationInProgress = false;
                 return;
             }
             
@@ -712,6 +736,7 @@ Terminal=false`;
                 global.log("[" + UUID + "] DEBUG: Validation failed - windows: " + (sessionData.windows ? "exists" : "missing") + 
                           ", isArray: " + Array.isArray(sessionData.windows) + 
                           ", length: " + (sessionData.windows ? sessionData.windows.length : "undefined"));
+                this._restorationInProgress = false;
                 return;
             }
             
@@ -739,6 +764,7 @@ Terminal=false`;
         } catch (e) {
             global.logError("[" + UUID + "] Failed to restore session: " + e);
             this._showNotification("Session Restore Failed", "Error: " + e.message);
+            this._restorationInProgress = false; // Release lock on error
         }
     },
     
@@ -760,12 +786,31 @@ Terminal=false`;
         for (let app in appWindows) {
             if (restoredApps.has(app)) continue;
             
-            global.log("[" + UUID + "] Launching application: " + app + " (" + appWindows[app].length + " windows expected)");
+            // Check if we already restored this app in this login session
+            if (this._restoredAppsThisSession.has(app)) {
+                global.log("[" + UUID + "] Skipping " + app + " - already restored in this session");
+                restoredApps.add(app);
+                continue;
+            }
+            
+            // Check if application is already running with sufficient windows
+            let currentWindowCount = this._countApplicationWindows(app);
+            let expectedWindowCount = appWindows[app].length;
+            
+            if (currentWindowCount >= expectedWindowCount) {
+                global.log("[" + UUID + "] Skipping " + app + " - already has " + currentWindowCount + " windows (expected " + expectedWindowCount + ")");
+                restoredApps.add(app);
+                this._restoredAppsThisSession.add(app);
+                continue;
+            }
+            
+            global.log("[" + UUID + "] Launching application: " + app + " (" + expectedWindowCount + " windows expected, " + currentWindowCount + " currently open)");
             
             try {
                 let launched = this._launchApplication(app);
                 if (launched) {
                     restoredApps.add(app);
+                    this._restoredAppsThisSession.add(app);
                     global.log("[" + UUID + "] Successfully launched: " + app);
                 } else {
                     global.log("[" + UUID + "] Failed to launch application: " + app);
@@ -779,6 +824,9 @@ Terminal=false`;
         let positioningDelay = Math.max(8000, restoredApps.size * 2000); // More time for more apps
         Mainloop.timeout_add(positioningDelay, () => { 
             this._positionWindows(sessionData);
+            // Release restoration lock after positioning is complete
+            this._restorationInProgress = false;
+            global.log("[" + UUID + "] Restoration complete - lock released");
             return false;
         });
         
