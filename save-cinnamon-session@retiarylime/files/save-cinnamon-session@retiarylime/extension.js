@@ -769,9 +769,9 @@ Terminal=false`;
     },
     
     _restoreApplications: function(sessionData) {
-        let restoredApps = new Set();
+        let restoredWindows = new Set(); // Track individual windows restored
         
-        // Group windows by application
+        // Group windows by application for logging
         let appWindows = {};
         for (let windowData of sessionData.windows) {
             if (!appWindows[windowData.app]) {
@@ -780,48 +780,57 @@ Terminal=false`;
             appWindows[windowData.app].push(windowData);
         }
         
-        global.log("[" + UUID + "] Attempting to restore " + Object.keys(appWindows).length + " applications");
+        global.log("[" + UUID + "] Attempting to restore " + sessionData.windows.length + " windows from " + Object.keys(appWindows).length + " applications");
         
-        // Launch applications - during session restore, prioritize launching over detection
+        // Log application breakdown
         for (let app in appWindows) {
-            if (restoredApps.has(app)) continue;
+            global.log("[" + UUID + "] " + app + ": " + appWindows[app].length + " windows");
+        }
+        
+        // Restore each window individually
+        let windowsToRestore = sessionData.windows.slice(); // Copy array
+        let restoredCount = 0;
+        
+        for (let i = 0; i < windowsToRestore.length; i++) {
+            let windowData = windowsToRestore[i];
+            let windowId = windowData.app + "_" + windowData.title + "_" + windowData.x + "_" + windowData.y;
             
-            // Check if we already restored this app in this login session
-            if (this._restoredAppsThisSession.has(app)) {
-                global.log("[" + UUID + "] Skipping " + app + " - already restored in this session");
-                restoredApps.add(app);
+            if (restoredWindows.has(windowId)) {
+                global.log("[" + UUID + "] Skipping duplicate window: " + windowId);
                 continue;
             }
             
-            // Check if application is already running with sufficient windows
-            let currentWindowCount = this._countApplicationWindows(app);
-            let expectedWindowCount = appWindows[app].length;
+            // Check if we already restored this app in this session (but allow multiple windows)
+            let currentWindowCount = this._countApplicationWindows(windowData.app);
+            let expectedWindowCount = appWindows[windowData.app].length;
             
-            if (currentWindowCount >= expectedWindowCount) {
-                global.log("[" + UUID + "] Skipping " + app + " - already has " + currentWindowCount + " windows (expected " + expectedWindowCount + ")");
-                restoredApps.add(app);
-                this._restoredAppsThisSession.add(app);
-                continue;
-            }
-            
-            global.log("[" + UUID + "] Launching application: " + app + " (" + expectedWindowCount + " windows expected, " + currentWindowCount + " currently open)");
+            global.log("[" + UUID + "] Restoring window " + (i + 1) + "/" + windowsToRestore.length + ": " + 
+                      windowData.app + " (" + windowData.title + ") - Current: " + currentWindowCount + ", Expected: " + expectedWindowCount);
             
             try {
-                let launched = this._launchApplication(app);
+                // For applications that support multiple windows, we need to launch them multiple times
+                // or use specific launch parameters
+                let launched = this._launchApplicationWindow(windowData);
                 if (launched) {
-                    restoredApps.add(app);
-                    this._restoredAppsThisSession.add(app);
-                    global.log("[" + UUID + "] Successfully launched: " + app);
+                    restoredWindows.add(windowId);
+                    restoredCount++;
+                    this._restoredAppsThisSession.add(windowData.app);
+                    global.log("[" + UUID + "] Successfully launched window: " + windowData.app + " (" + windowData.title + ")");
                 } else {
-                    global.log("[" + UUID + "] Failed to launch application: " + app);
+                    global.log("[" + UUID + "] Failed to launch window: " + windowData.app + " (" + windowData.title + ")");
                 }
             } catch (e) {
-                global.log("[" + UUID + "] Exception launching application: " + app + " - " + e);
+                global.log("[" + UUID + "] Exception launching window: " + windowData.app + " - " + e);
+            }
+            
+            // Add delay between window launches to avoid overwhelming the system
+            if (i < windowsToRestore.length - 1) {
+                // We'll use setTimeout to add delays, but for now continue synchronously
             }
         }
         
-        // Schedule window positioning with longer delay for more apps
-        let positioningDelay = Math.max(8000, restoredApps.size * 2000); // More time for more apps
+        // Schedule window positioning with longer delay based on number of windows
+        let positioningDelay = Math.max(10000, restoredCount * 2000); // More time for more windows
         Mainloop.timeout_add(positioningDelay, () => { 
             this._positionWindows(sessionData);
             // Release restoration lock after positioning is complete
@@ -830,7 +839,7 @@ Terminal=false`;
             return false;
         });
         
-        global.log("[" + UUID + "] Launched " + restoredApps.size + " applications, positioning in " + positioningDelay + "ms");
+        global.log("[" + UUID + "] Launched " + restoredCount + " windows, positioning in " + positioningDelay + "ms");
     },
     
     _isApplicationRunning: function(appName) {
@@ -973,8 +982,112 @@ Terminal=false`;
         return launched;
     },
     
+    _launchApplicationWindow: function(windowData) {
+        let launched = false;
+        let app = windowData.app;
+        
+        global.log("[" + UUID + "] Attempting to launch window: " + app + " (" + windowData.title + ")");
+        
+        // Special handling for applications that support specific window opening
+        if (app === "org.Nemo" || app === "Nemo") {
+            // For file manager, try to open the specific location
+            try {
+                let path = this._extractPathFromTitle(windowData.title);
+                if (path) {
+                    Util.spawn_command_line_async('nemo "' + path + '"');
+                    launched = true;
+                    global.log("[" + UUID + "] Launched Nemo with path: " + path);
+                } else {
+                    Util.spawn_command_line_async('nemo');
+                    launched = true;
+                    global.log("[" + UUID + "] Launched Nemo (default location)");
+                }
+            } catch (e) {
+                global.log("[" + UUID + "] Failed to launch Nemo: " + e);
+            }
+        } else if (app === "Code") {
+            // For VS Code, try to open with workspace or file
+            try {
+                let workspace = this._extractWorkspaceFromTitle(windowData.title);
+                if (workspace) {
+                    Util.spawn_command_line_async('code "' + workspace + '"');
+                    launched = true;
+                    global.log("[" + UUID + "] Launched VS Code with workspace: " + workspace);
+                } else {
+                    Util.spawn_command_line_async('code');
+                    launched = true;
+                    global.log("[" + UUID + "] Launched VS Code (new window)");
+                }
+            } catch (e) {
+                global.log("[" + UUID + "] Failed to launch VS Code: " + e);
+            }
+        } else if (app === "Terminator") {
+            // For terminal, open new window
+            try {
+                Util.spawn_command_line_async('terminator --new-tab');
+                launched = true;
+                global.log("[" + UUID + "] Launched Terminator (new window)");
+            } catch (e) {
+                try {
+                    Util.spawn_command_line_async('terminator');
+                    launched = true;
+                    global.log("[" + UUID + "] Launched Terminator (fallback)");
+                } catch (e2) {
+                    global.log("[" + UUID + "] Failed to launch Terminator: " + e2);
+                }
+            }
+        } else if (app === "firefox" || app === "Firefox") {
+            // For Firefox, open new window
+            try {
+                Util.spawn_command_line_async('firefox --new-window');
+                launched = true;
+                global.log("[" + UUID + "] Launched Firefox (new window)");
+            } catch (e) {
+                try {
+                    Util.spawn_command_line_async('firefox');
+                    launched = true;
+                    global.log("[" + UUID + "] Launched Firefox (fallback)");
+                } catch (e2) {
+                    global.log("[" + UUID + "] Failed to launch Firefox: " + e2);
+                }
+            }
+        } else {
+            // For other applications, use the general launch method
+            launched = this._launchApplication(app);
+        }
+        
+        return launched;
+    },
+    
+    _extractPathFromTitle: function(title) {
+        // Extract file path from Nemo window title
+        // Common patterns: "Home", "/tmp", "/path/to/folder"
+        if (title === "Home") {
+            return GLib.get_home_dir();
+        } else if (title.startsWith("/")) {
+            return title;
+        } else if (title === "tmp") {
+            return "/tmp";
+        }
+        return null;
+    },
+    
+    _extractWorkspaceFromTitle: function(title) {
+        // Extract workspace/project from VS Code title
+        // Pattern: "filename - workspace (Workspace) - Visual Studio Code"
+        if (title.includes(" - ") && title.includes("(Workspace)")) {
+            let parts = title.split(" - ");
+            if (parts.length >= 2) {
+                let workspace = parts[1].replace(" (Workspace)", "");
+                return workspace;
+            }
+        }
+        return null;
+    },
+    
     _positionWindows: function(sessionData) {
         let positionedCount = 0;
+        let positionedWindows = new Set(); // Track which actual windows we've positioned
         
         global.log("[" + UUID + "] Attempting to position " + sessionData.windows.length + " windows");
         
@@ -986,6 +1099,12 @@ Terminal=false`;
                 let window = windowActor.get_meta_window();
                 if (!window) continue;
                 
+                // Skip if we already positioned this window
+                let windowId = window.get_stable_sequence();
+                if (positionedWindows.has(windowId)) {
+                    continue;
+                }
+                
                 // Try multiple matching strategies
                 let app = window.get_gtk_application_id() || 
                          window.get_wm_class() || 
@@ -996,10 +1115,16 @@ Terminal=false`;
                 let wmClassMatch = window.get_wm_class() === windowData.wmClass;
                 let wmInstanceMatch = window.get_wm_class_instance() === windowData.wmClassInstance;
                 
-                // Match based on app and either title or WM class
-                if (appMatch && (titleMatch || wmClassMatch || wmInstanceMatch)) {
+                // For applications with multiple windows, prefer exact title matches
+                let isExactMatch = appMatch && titleMatch;
+                let isGoodMatch = appMatch && (wmClassMatch || wmInstanceMatch);
+                let isBasicMatch = appMatch && !titleMatch;
+                
+                // Prioritize exact matches, then good matches for same app
+                if (isExactMatch || (isGoodMatch && !windowFound) || (isBasicMatch && !windowFound && !this._hasExactTitleMatch(windows, windowData))) {
                     try {
-                        global.log("[" + UUID + "] Positioning window: " + windowData.app + " -> " + windowData.title);
+                        global.log("[" + UUID + "] Positioning window: " + windowData.app + " -> " + windowData.title + 
+                                  " (match: " + (isExactMatch ? "exact" : isGoodMatch ? "good" : "basic") + ")");
                         
                         // Move to correct workspace first
                         let workspace = global.workspace_manager.get_workspace_by_index(windowData.workspace);
@@ -1031,8 +1156,13 @@ Terminal=false`;
                         }
                         
                         positionedCount++;
+                        positionedWindows.add(windowId);
                         windowFound = true;
-                        break;
+                        
+                        // For exact matches, break immediately
+                        if (isExactMatch) {
+                            break;
+                        }
                     } catch (e) {
                         global.log("[" + UUID + "] Failed to position window: " + windowData.title + " - " + e);
                     }
@@ -1058,6 +1188,23 @@ Terminal=false`;
                 global.log("[" + UUID + "] Switched to workspace " + sessionData.currentWorkspace);
             }
         }
+    },
+    
+    _hasExactTitleMatch: function(windows, windowData) {
+        // Check if there's a window with the exact title match for this app
+        for (let windowActor of windows) {
+            let window = windowActor.get_meta_window();
+            if (!window) continue;
+            
+            let app = window.get_gtk_application_id() || 
+                     window.get_wm_class() || 
+                     window.get_wm_class_instance();
+            
+            if (app === windowData.app && window.get_title() === windowData.title) {
+                return true;
+            }
+        }
+        return false;
     },
     
     _showNotification: function(title, message) {
