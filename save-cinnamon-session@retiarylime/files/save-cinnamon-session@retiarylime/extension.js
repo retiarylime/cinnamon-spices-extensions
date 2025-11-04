@@ -32,15 +32,16 @@ SaveCinnamonSessionExtension.prototype = {
         this._restoreTimeout = null;
         this._autoSaveId = null;
         this._sessionFile = GLib.get_home_dir() + "/.cinnamon-session-save.json";
+        this._logoutDetected = false;
         
         // Set default values first
         this.autoSaveOnLogout = true;
         this.autoRestoreOnLogin = true;
-        this.restoreDelay = 3000; // 3 seconds delay before restoring
-        this.excludedApps = "cinnamon-settings,cinnamon-killer-daemon,nemo-desktop";
+        this.restoreDelay = 5000; // 5 seconds delay before restoring
+        this.excludedApps = "cinnamon-settings,cinnamon-killer-daemon";
         this.manualSaveKeybinding = "<Super><Shift>s";
         this.manualRestoreKeybinding = "<Super><Shift>r";
-        this.debugMode = false;
+        this.debugMode = true; // Enable debug mode by default for better troubleshooting
         
         // Settings - try to bind with error handling
         try {
@@ -90,34 +91,132 @@ SaveCinnamonSessionExtension.prototype = {
             return;
         }
         
-        // Multiple restoration attempts with increasing delays to handle desktop loading
-        let attempts = [
-            { delay: this.restoreDelay, description: "Initial attempt" },
-            { delay: this.restoreDelay + 5000, description: "Second attempt (if first failed)" },
-            { delay: this.restoreDelay + 15000, description: "Final attempt" }
+        global.log("[" + UUID + "] SESSION RESTORE STARTING");
+        
+        // Start restoration process with staggered timing for reliability
+        let restoreAttempts = [
+            { delay: 3000, name: "Quick restore" },      // 3 seconds - catch early desktop
+            { delay: 8000, name: "Main restore" },       // 8 seconds - main attempt  
+            { delay: 15000, name: "Delayed restore" },   // 15 seconds - after full desktop load
+            { delay: 25000, name: "Final restore" }      // 25 seconds - final safety net
         ];
         
-        global.log("[" + UUID + "] Scheduling " + attempts.length + " restoration attempts");
+        global.log("[" + UUID + "] Scheduling " + restoreAttempts.length + " restoration attempts");
         
-        for (let i = 0; i < attempts.length; i++) {
-            let attempt = attempts[i];
+        for (let i = 0; i < restoreAttempts.length; i++) {
+            let attempt = restoreAttempts[i];
             Mainloop.timeout_add(attempt.delay, () => {
-                global.log("[" + UUID + "] " + attempt.description + " at " + attempt.delay + "ms");
+                global.log("[" + UUID + "] *** " + attempt.name.toUpperCase() + " ATTEMPT at " + attempt.delay + "ms ***");
                 this._restoreSession();
                 return false;
             });
         }
+        
+        // Also create a startup script as backup
+        this._createStartupScript();
+    },
+    
+    _createStartupScript: function() {
+        try {
+            let scriptContent = `#!/bin/bash
+# Cinnamon Session Restore Backup Script
+sleep 10
+SESSION_FILE="$HOME/.cinnamon-session-save.json"
+if [ -f "$SESSION_FILE" ]; then
+    echo "Backup session restore triggered"
+    # Parse session file and launch applications
+    python3 -c "
+import json
+import subprocess
+import time
+
+try:
+    with open('$SESSION_FILE', 'r') as f:
+        session = json.load(f)
+    
+    apps_launched = set()
+    for window in session.get('windows', []):
+        app = window.get('app', '')
+        exec_path = window.get('execPath', '')
+        
+        # Skip if already launched
+        if app in apps_launched:
+            continue
+            
+        # Try to launch application
+        launch_cmd = None
+        if app == 'Code':
+            launch_cmd = 'code'
+        elif app == 'firefox':
+            launch_cmd = 'firefox'
+        elif app == 'Brave-browser':
+            launch_cmd = 'brave-browser'
+        elif app == 'Terminator':
+            launch_cmd = 'terminator'
+        elif app == 'Nemo' or app == 'org.Nemo':
+            launch_cmd = 'nemo'
+        elif exec_path:
+            launch_cmd = exec_path
+        else:
+            launch_cmd = app.lower()
+        
+        if launch_cmd:
+            try:
+                subprocess.Popen([launch_cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                apps_launched.add(app)
+                print(f'Launched: {launch_cmd}')
+                time.sleep(1)  # Wait between launches
+            except:
+                print(f'Failed to launch: {launch_cmd}')
+                
+except Exception as e:
+    print(f'Session restore error: {e}')
+"
+fi`;
+            
+            let scriptFile = GLib.get_home_dir() + "/.cinnamon-session-restore.sh";
+            let file = Gio.File.new_for_path(scriptFile);
+            let stream = file.replace(null, false, Gio.FileCreateFlags.NONE, null);
+            let bytes = new GLib.Bytes(scriptContent);
+            stream.write_bytes(bytes, null);
+            stream.close(null);
+            
+            // Make executable
+            Util.spawn_command_line_async("chmod +x " + scriptFile);
+            
+            // Schedule script execution
+            Mainloop.timeout_add(30000, () => { // 30 seconds after login
+                Util.spawn_command_line_async(scriptFile);
+                return false;
+            });
+            
+            global.log("[" + UUID + "] Backup startup script created and scheduled");
+        } catch (e) {
+            global.log("[" + UUID + "] Could not create startup script: " + e);
+        }
     },
     
     disable: function() {
-        global.log("[" + UUID + "] Disabling extension - FORCING SESSION SAVE");
+        global.log("[" + UUID + "] ==========================================");
+        global.log("[" + UUID + "] DISABLE CALLED - LOGOUT/SHUTDOWN DETECTED");
+        global.log("[" + UUID + "] ==========================================");
         
-        // CRITICAL: Save session IMMEDIATELY on disable - this is our most reliable logout detection
+        this._logoutDetected = true;
+        
+        // CRITICAL: Save session MULTIPLE TIMES on disable for maximum reliability
         if (this.autoSaveOnLogout) {
-            global.log("[" + UUID + "] LOGOUT DETECTED - Saving session immediately");
+            global.log("[" + UUID + "] EMERGENCY SESSION SAVE #1");
             this._saveSession();
-            // Also create a backup save
+            
+            // Additional saves with slight delays
+            Mainloop.timeout_add(50, () => {
+                global.log("[" + UUID + "] EMERGENCY SESSION SAVE #2");
+                this._saveSession();
+                return false;
+            });
+            
             Mainloop.timeout_add(100, () => {
+                global.log("[" + UUID + "] EMERGENCY SESSION SAVE #3");
                 this._saveSession();
                 return false;
             });
@@ -156,7 +255,7 @@ SaveCinnamonSessionExtension.prototype = {
             this.settings = null;
         }
         
-        global.log("[" + UUID + "] Extension disabled and session FORCIBLY saved for logout");
+        global.log("[" + UUID + "] LOGOUT SESSION SAVE COMPLETED - Extension disabled");
     },
     
     _onSettingsChanged: function() {
@@ -346,16 +445,18 @@ WantedBy=shutdown.target`;
         try {
             let autostartContent = `[Desktop Entry]
 Type=Application
-Name=Cinnamon Session Restore Helper
-Comment=Helper to ensure session restoration works on login
-Exec=bash -c "sleep 5 && dbus-send --session --type=method_call --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.ListNames | grep -q org.Cinnamon && echo 'Session restore ready' || true"
+Name=Cinnamon Session Restore
+Comment=Restore saved Cinnamon session on login
+Exec=bash -c "sleep 8 && if [ -f ~/.cinnamon-session-save.json ]; then dbus-send --session --type=method_call --dest=org.Cinnamon /org/Cinnamon org.Cinnamon.RestoreSession 2>/dev/null || ~/.cinnamon-session-restore.sh; fi"
 Hidden=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
-X-GNOME-Autostart-Delay=5`;
+X-GNOME-Autostart-Delay=8
+StartupNotify=false
+Terminal=false`;
             
             let autostartDir = GLib.get_home_dir() + "/.config/autostart";
-            let autostartFile = autostartDir + "/cinnamon-session-restore-helper.desktop";
+            let autostartFile = autostartDir + "/cinnamon-session-restore.desktop";
             
             // Create autostart directory if it doesn't exist
             let dir = Gio.File.new_for_path(autostartDir);
@@ -370,7 +471,7 @@ X-GNOME-Autostart-Delay=5`;
             stream.write_bytes(bytes, null);
             stream.close(null);
             
-            global.log("[" + UUID + "] Autostart entry created for session restoration");
+            global.log("[" + UUID + "] Enhanced autostart entry created for session restoration");
         } catch (e) {
             global.log("[" + UUID + "] Could not create autostart entry: " + e);
         }
@@ -475,8 +576,13 @@ X-GNOME-Autostart-Delay=5`;
                 continue;
             }
             
-            // Skip excluded applications
-            if (excludedAppsArray.some(excluded => app.toLowerCase().includes(excluded))) {
+            // Skip excluded applications - be more lenient with exclusions
+            let shouldExclude = excludedAppsArray.some(excluded => {
+                return app.toLowerCase().includes(excluded) || 
+                       window.get_title().toLowerCase().includes(excluded);
+            });
+            
+            if (shouldExclude) {
                 global.log("[" + UUID + "] Excluding application: " + app);
                 continue;
             }
@@ -487,6 +593,17 @@ X-GNOME-Autostart-Delay=5`;
             // Get additional window information
             let pid = window.get_pid();
             let windowType = window.get_window_type();
+            
+            // Get executable path for better restoration
+            let execPath = "";
+            try {
+                let [success, out] = GLib.spawn_command_line_sync('ps -p ' + pid + ' -o comm=');
+                if (success && out.length > 0) {
+                    execPath = out.toString().trim();
+                }
+            } catch (e) {
+                // Ignore errors getting executable path
+            }
             
             let windowData = {
                 app: app,
@@ -502,7 +619,8 @@ X-GNOME-Autostart-Delay=5`;
                 pid: pid,
                 windowType: windowType,
                 wmClass: window.get_wm_class(),
-                wmClassInstance: window.get_wm_class_instance()
+                wmClassInstance: window.get_wm_class_instance(),
+                execPath: execPath
             };
             
             sessionData.windows.push(windowData);
@@ -641,79 +759,103 @@ X-GNOME-Autostart-Delay=5`;
     _launchApplication: function(app) {
         let launched = false;
         
-        // Method 1: Try as a desktop file name via Cinnamon's app system
+        global.log("[" + UUID + "] Attempting to launch application: " + app);
+        
+        // Application mapping for reliable launching
+        let appCommands = {
+            'Code': ['code', 'code-oss', '/usr/bin/code'],
+            'firefox': ['firefox', 'firefox-esr', '/usr/bin/firefox'],
+            'Brave-browser': ['brave-browser', 'brave', '/usr/bin/brave-browser'],
+            'Terminator': ['terminator', '/usr/bin/terminator'],
+            'Nemo': ['nemo', '/usr/bin/nemo'],
+            'org.Nemo': ['nemo', '/usr/bin/nemo'],
+            'Xlet-settings.py': ['cinnamon-settings extensions'],
+            'gnome-terminal-server': ['gnome-terminal', '/usr/bin/gnome-terminal'],
+            'thunderbird': ['thunderbird', '/usr/bin/thunderbird'],
+            'libreoffice': ['libreoffice', '/usr/bin/libreoffice'],
+            'gedit': ['gedit', '/usr/bin/gedit'],
+            'nautilus': ['nautilus', '/usr/bin/nautilus']
+        };
+        
+        // Get possible commands for this app
+        let commands = appCommands[app] || [app, app.toLowerCase()];
+        
+        // Method 1: Try known command mappings
+        for (let cmd of commands) {
+            if (launched) break;
+            try {
+                if (cmd.includes('/')) {
+                    // Full path command
+                    Util.spawn_async([cmd], null);
+                } else {
+                    // Regular command
+                    Util.spawn_command_line_async(cmd);
+                }
+                launched = true;
+                global.log("[" + UUID + "] Successfully launched via command: " + cmd);
+                break;
+            } catch (e) {
+                // Try next command
+            }
+        }
+        
+        // Method 2: Try desktop file launching
+        if (!launched) {
+            try {
+                let desktopFiles = [
+                    app + '.desktop',
+                    app.toLowerCase() + '.desktop',
+                    app.replace(/[^a-zA-Z0-9]/g, '').toLowerCase() + '.desktop'
+                ];
+                
+                for (let desktopFile of desktopFiles) {
+                    try {
+                        Util.spawn_command_line_async('gtk-launch ' + desktopFile);
+                        launched = true;
+                        global.log("[" + UUID + "] Successfully launched via desktop file: " + desktopFile);
+                        break;
+                    } catch (e) {
+                        // Try next desktop file
+                    }
+                }
+            } catch (e) {
+                // Continue to next method
+            }
+        }
+        
+        // Method 3: Try Cinnamon app system
         if (!launched) {
             try {
                 let appSystem = Cinnamon.AppSystem.get_default();
-                let appInfo = appSystem.lookup_app(app + '.desktop');
-                if (!appInfo) {
-                    appInfo = appSystem.lookup_app(app);
-                }
+                let appInfo = appSystem.lookup_app(app + '.desktop') || appSystem.lookup_app(app);
                 if (appInfo) {
                     appInfo.launch([], null);
                     launched = true;
-                    global.log("[" + UUID + "] Launched via app system: " + app);
+                    global.log("[" + UUID + "] Successfully launched via Cinnamon app system: " + app);
                 }
             } catch (e) {
-                // Continue to next method
+                // Continue
             }
         }
         
-        // Method 2: Try desktop file if it looks like an app ID
-        if (!launched && app.includes('.')) {
-            try {
-                Util.spawn_command_line_async('gtk-launch ' + app);
-                launched = true;
-                global.log("[" + UUID + "] Launched via gtk-launch: " + app);
-            } catch (e) {
-                // Continue to next method
-            }
-        }
-        
-        // Method 3: Try direct command with lowercase
+        // Method 4: Try direct executable
         if (!launched) {
             try {
-                Util.spawn_command_line_async(app.toLowerCase());
-                launched = true;
-                global.log("[" + UUID + "] Launched via command line: " + app);
-            } catch (e) {
-                // Continue to next method
-            }
-        }
-        
-        // Method 4: Try with common name variations
-        if (!launched) {
-            let commonNames = {
-                'Code': 'code',
-                'Brave-browser': 'brave-browser',
-                'firefox': 'firefox',
-                'Terminator': 'terminator',
-                'Nemo': 'nemo',
-                'org.Nemo': 'nemo',
-                'Xlet-settings.py': 'cinnamon-settings'
-            };
-            
-            let cmdName = commonNames[app];
-            if (cmdName) {
-                try {
-                    Util.spawn_command_line_async(cmdName);
+                // Check if command exists
+                let [success, out] = GLib.spawn_command_line_sync('which ' + app.toLowerCase());
+                if (success && out.length > 0) {
+                    let execPath = out.toString().trim();
+                    Util.spawn_async([execPath], null);
                     launched = true;
-                    global.log("[" + UUID + "] Launched via name mapping: " + cmdName);
-                } catch (e) {
-                    // Continue
+                    global.log("[" + UUID + "] Successfully launched via which: " + execPath);
                 }
-            }
-        }
-        
-        // Method 5: Try spawn_async
-        if (!launched) {
-            try {
-                Util.spawn_async([app.toLowerCase()], null);
-                launched = true;
-                global.log("[" + UUID + "] Launched via spawn_async: " + app);
             } catch (e) {
                 // Final attempt failed
             }
+        }
+        
+        if (!launched) {
+            global.log("[" + UUID + "] FAILED to launch application: " + app);
         }
         
         return launched;
