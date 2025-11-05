@@ -835,8 +835,14 @@ Terminal=false`;
         
         // Launch windows with staggered timing to prevent browser conflicts
         this._launchWindowsSequentially(windowsToRestore, appWindows, 0, (finalRestoredCount) => {
+            // After all windows are launched, clean up any excess browser windows
+            Mainloop.timeout_add(3000, () => {
+                this._cleanupExcessBrowserWindows(sessionData);
+                return false;
+            });
+            
             // Schedule window positioning with longer delay based on number of windows
-            let positioningDelay = Math.max(10000, finalRestoredCount * 2000); // More time for more windows
+            let positioningDelay = Math.max(12000, finalRestoredCount * 2000); // Extra time for cleanup
             Mainloop.timeout_add(positioningDelay, () => { 
                 this._positionWindows(sessionData);
                 // Release restoration lock after positioning is complete
@@ -846,7 +852,7 @@ Terminal=false`;
                 return false;
             });
             
-            global.log("[" + UUID + "] Launched " + finalRestoredCount + " windows, positioning in " + positioningDelay + "ms");
+            global.log("[" + UUID + "] Launched " + finalRestoredCount + " windows, cleanup in 3s, positioning in " + positioningDelay + "ms");
         });
     },
     
@@ -918,14 +924,30 @@ Terminal=false`;
         let windows = global.get_window_actors();
         for (let windowActor of windows) {
             let window = windowActor.get_meta_window();
-            if (!window) continue;
+            if (!window || window.is_skip_taskbar()) continue;
             
-            let app = window.get_gtk_application_id() || 
-                     window.get_wm_class() || 
-                     window.get_wm_class_instance();
+            let gtkAppId = window.get_gtk_application_id();
+            let wmClass = window.get_wm_class();
+            let wmClassInstance = window.get_wm_class_instance();
             
-            if (app === appName) {
+            // Check for exact matches
+            if (gtkAppId === appName || wmClass === appName || wmClassInstance === appName) {
                 return true;
+            }
+            
+            // Special handling for browsers
+            if (appName === "Brave-browser") {
+                if (wmClass === "Brave-browser" || wmClassInstance === "brave-browser" || 
+                    gtkAppId === "com.brave.Browser") {
+                    return true;
+                }
+            }
+            
+            if (appName === "firefox") {
+                if (wmClass === "firefox" || wmClassInstance === "Navigator" || 
+                    gtkAppId === "firefox" || wmClass === "Firefox") {
+                    return true;
+                }
             }
         }
         return false;
@@ -936,14 +958,29 @@ Terminal=false`;
         let windows = global.get_window_actors();
         for (let windowActor of windows) {
             let window = windowActor.get_meta_window();
-            if (!window) continue;
+            if (!window || window.is_skip_taskbar()) continue;
             
-            let app = window.get_gtk_application_id() || 
-                     window.get_wm_class() || 
-                     window.get_wm_class_instance();
+            let gtkAppId = window.get_gtk_application_id();
+            let wmClass = window.get_wm_class();
+            let wmClassInstance = window.get_wm_class_instance();
             
-            if (app === appName) {
+            // Check for exact matches
+            if (gtkAppId === appName || wmClass === appName || wmClassInstance === appName) {
                 count++;
+                continue;
+            }
+            
+            // Special handling for browsers
+            if (appName === "Brave-browser") {
+                if (wmClass === "Brave-browser" || wmClassInstance === "brave-browser" || 
+                    gtkAppId === "com.brave.Browser") {
+                    count++;
+                }
+            } else if (appName === "firefox") {
+                if (wmClass === "firefox" || wmClassInstance === "Navigator" || 
+                    gtkAppId === "firefox" || wmClass === "Firefox") {
+                    count++;
+                }
             }
         }
         return count;
@@ -1145,32 +1182,24 @@ Terminal=false`;
                 }
             }
         } else if (app === "Brave-browser" || app === "brave-browser") {
-            // For Brave browser, handle first launch vs subsequent windows carefully
+            // For Brave browser, use a simpler approach to prevent extra windows
             global.log("[" + UUID + "] Entering Brave browser launch section");
             
-            let isFirstBraveWindow = !this._launchedBrowsers.has("Brave-browser");
             let currentBraveWindows = this._countApplicationWindows("Brave-browser");
-            
-            global.log("[" + UUID + "] Brave status - First window: " + isFirstBraveWindow + 
-                      ", Current windows: " + currentBraveWindows);
+            global.log("[" + UUID + "] Current Brave windows before launch: " + currentBraveWindows);
             
             try {
-                if (isFirstBraveWindow && currentBraveWindows === 0) {
-                    // First Brave window - launch without --new-window to avoid extra default window
-                    global.log("[" + UUID + "] Launching first Brave browser window (no --new-window)");
-                    GLib.spawn_command_line_async('brave-browser');
-                    this._launchedBrowsers.add("Brave-browser");
-                    launched = true;
-                    global.log("[" + UUID + "] Launched first Brave window");
-                } else {
-                    // Subsequent Brave windows - use --new-window
-                    global.log("[" + UUID + "] Launching additional Brave browser window (--new-window)");
-                    GLib.spawn_command_line_async('brave-browser --new-window');
-                    launched = true;
-                    global.log("[" + UUID + "] Launched additional Brave window");
-                }
+                // Always use --new-window for consistency, but we'll clean up extras later
+                global.log("[" + UUID + "] Launching Brave browser window");
+                GLib.spawn_command_line_async('brave-browser --new-window');
+                launched = true;
+                global.log("[" + UUID + "] Launched Brave window");
+                
+                // Mark that we've launched Brave for cleanup tracking
+                this._launchedBrowsers.add("Brave-browser");
+                
             } catch (e) {
-                global.log("[" + UUID + "] First brave command failed: " + e);
+                global.log("[" + UUID + "] Brave launch failed: " + e);
                 try {
                     global.log("[" + UUID + "] Attempting fallback brave-browser command");
                     GLib.spawn_command_line_async('brave-browser');
@@ -1360,6 +1389,93 @@ Terminal=false`;
             // If notification fails, just log it
             global.log("[" + UUID + "] Notification: " + title + " - " + message);
         }
+    },
+    
+    _cleanupExcessBrowserWindows: function(sessionData) {
+        global.log("[" + UUID + "] Starting cleanup of excess browser windows");
+        
+        // Count expected windows by browser type
+        let expectedBrowserWindows = {};
+        for (let windowData of sessionData.windows) {
+            if (windowData.app === "Brave-browser" || windowData.app === "firefox") {
+                if (!expectedBrowserWindows[windowData.app]) {
+                    expectedBrowserWindows[windowData.app] = 0;
+                }
+                expectedBrowserWindows[windowData.app]++;
+            }
+        }
+        
+        global.log("[" + UUID + "] Expected browser windows: " + JSON.stringify(expectedBrowserWindows));
+        
+        // Check current browser windows and close extras
+        for (let browserApp in expectedBrowserWindows) {
+            let expectedCount = expectedBrowserWindows[browserApp];
+            let currentWindows = this._getBrowserWindows(browserApp);
+            let currentCount = currentWindows.length;
+            
+            global.log("[" + UUID + "] " + browserApp + " - Expected: " + expectedCount + ", Current: " + currentCount);
+            
+            if (currentCount > expectedCount) {
+                let excessCount = currentCount - expectedCount;
+                global.log("[" + UUID + "] Closing " + excessCount + " excess " + browserApp + " windows");
+                
+                // Close the newest windows (likely the extra ones created during startup)
+                // Sort by creation time or position, prefer closing "New tab" windows
+                let windowsToClose = currentWindows
+                    .filter(w => w.get_title().includes("New tab") || w.get_title() === "New Tab")
+                    .slice(0, excessCount);
+                
+                // If not enough "New tab" windows, close any excess windows
+                if (windowsToClose.length < excessCount) {
+                    let remaining = excessCount - windowsToClose.length;
+                    let otherWindows = currentWindows
+                        .filter(w => !windowsToClose.includes(w))
+                        .slice(-remaining); // Take the last ones (newest)
+                    windowsToClose = windowsToClose.concat(otherWindows);
+                }
+                
+                for (let i = 0; i < Math.min(excessCount, windowsToClose.length); i++) {
+                    let windowToClose = windowsToClose[i];
+                    global.log("[" + UUID + "] Closing excess window: " + windowToClose.get_title());
+                    try {
+                        windowToClose.delete(global.get_current_time());
+                    } catch (e) {
+                        global.log("[" + UUID + "] Failed to close window: " + e);
+                    }
+                }
+            }
+        }
+        
+        global.log("[" + UUID + "] Browser window cleanup completed");
+    },
+    
+    _getBrowserWindows: function(browserApp) {
+        let browserWindows = [];
+        let windows = global.get_window_actors();
+        
+        for (let windowActor of windows) {
+            let window = windowActor.get_meta_window();
+            if (!window || window.is_skip_taskbar()) continue;
+            
+            let gtkAppId = window.get_gtk_application_id();
+            let wmClass = window.get_wm_class();
+            let wmClassInstance = window.get_wm_class_instance();
+            
+            let matches = false;
+            if (browserApp === "Brave-browser") {
+                matches = wmClass === "Brave-browser" || wmClassInstance === "brave-browser" || 
+                         gtkAppId === "com.brave.Browser";
+            } else if (browserApp === "firefox") {
+                matches = wmClass === "firefox" || wmClassInstance === "Navigator" || 
+                         gtkAppId === "firefox" || wmClass === "Firefox";
+            }
+            
+            if (matches) {
+                browserWindows.push(window);
+            }
+        }
+        
+        return browserWindows;
     }
 };
 
