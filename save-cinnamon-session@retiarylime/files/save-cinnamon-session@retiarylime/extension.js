@@ -695,6 +695,15 @@ Terminal=false`;
                 execPath: execPath
             };
             
+            // For VS Code, try to extract and store workspace information
+            if (app === "Code") {
+                let extractedWorkspace = this._extractWorkspaceFromTitle(windowData.title);
+                if (extractedWorkspace) {
+                    windowData.vscodeWorkspace = extractedWorkspace;
+                    global.log("[" + UUID + "] Captured VS Code workspace: " + extractedWorkspace);
+                }
+            }
+            
             // Create a unique key for duplicate detection - use PID and window handle for better uniqueness
             let windowHandle = window.get_stable_sequence ? window.get_stable_sequence() : window.get_id();
             let windowKey = app + "|" + windowData.title + "|" + pid + "|" + windowHandle;
@@ -1116,23 +1125,55 @@ Terminal=false`;
                 global.log("[" + UUID + "] Failed to launch Nemo: " + e);
             }
         } else if (app === "Code") {
-            // For VS Code, try to open with workspace or file
+            // For VS Code, try to open with the most recent workspace/folder
             global.log("[" + UUID + "] Entering VS Code launch section");
             try {
-                let workspace = this._extractWorkspaceFromTitle(windowData.title);
-                if (workspace) {
-                    global.log("[" + UUID + "] Launching VS Code with workspace: " + workspace);
-                    GLib.spawn_command_line_async('code "' + workspace + '"');
+                // Priority 1: Use stored workspace from saved session
+                let storedWorkspace = windowData.vscodeWorkspace;
+                // Priority 2: Extract workspace from current title
+                let extractedWorkspace = this._extractWorkspaceFromTitle(windowData.title);
+                // Priority 3: Get most recent workspace from VS Code storage
+                let recentWorkspace = this._getVSCodeRecentWorkspace();
+                
+                if (storedWorkspace) {
+                    // Use the workspace that was stored when the session was saved
+                    global.log("[" + UUID + "] Launching VS Code with stored workspace: " + storedWorkspace);
+                    let command = this._buildVSCodeCommand(storedWorkspace);
+                    GLib.spawn_command_line_async(command);
                     launched = true;
-                    global.log("[" + UUID + "] Launched VS Code with workspace: " + workspace);
+                    global.log("[" + UUID + "] Launched VS Code with stored workspace");
+                } else if (extractedWorkspace) {
+                    // Try to open the specific workspace from the title
+                    global.log("[" + UUID + "] Launching VS Code with extracted workspace: " + extractedWorkspace);
+                    let command = this._buildVSCodeCommand(extractedWorkspace);
+                    GLib.spawn_command_line_async(command);
+                    launched = true;
+                    global.log("[" + UUID + "] Launched VS Code with extracted workspace");
+                } else if (recentWorkspace) {
+                    // Open the most recent workspace/folder
+                    global.log("[" + UUID + "] Launching VS Code with recent workspace: " + recentWorkspace);
+                    let command = this._buildVSCodeCommand(recentWorkspace);
+                    GLib.spawn_command_line_async(command);
+                    launched = true;
+                    global.log("[" + UUID + "] Launched VS Code with recent workspace");
                 } else {
-                    global.log("[" + UUID + "] Launching VS Code with new window");
-                    GLib.spawn_command_line_async('code');
+                    // Try to restore the last session automatically
+                    global.log("[" + UUID + "] Launching VS Code with last session restore");
+                    GLib.spawn_command_line_async('code --restore-last-session');
                     launched = true;
-                    global.log("[" + UUID + "] Launched VS Code (new window)");
+                    global.log("[" + UUID + "] Launched VS Code with last session restore");
                 }
             } catch (e) {
-                global.log("[" + UUID + "] Failed to launch VS Code: " + e);
+                global.log("[" + UUID + "] VS Code launch failed, trying fallback: " + e);
+                try {
+                    // Fallback to simple launch
+                    global.log("[" + UUID + "] Attempting fallback VS Code launch");
+                    GLib.spawn_command_line_async('code');
+                    launched = true;
+                    global.log("[" + UUID + "] Launched VS Code (fallback)");
+                } catch (e2) {
+                    global.log("[" + UUID + "] Failed to launch VS Code: " + e2);
+                }
             }
         } else if (app === "Terminator") {
             // For terminal, open new window
@@ -1239,15 +1280,188 @@ Terminal=false`;
     
     _extractWorkspaceFromTitle: function(title) {
         // Extract workspace/project from VS Code title
-        // Pattern: "filename - workspace (Workspace) - Visual Studio Code"
-        if (title.includes(" - ") && title.includes("(Workspace)")) {
-            let parts = title.split(" - ");
-            if (parts.length >= 2) {
-                let workspace = parts[1].replace(" (Workspace)", "");
-                return workspace;
+        // Common patterns:
+        // "filename - workspace (Workspace) - Visual Studio Code"
+        // "workspace (Workspace) - Visual Studio Code" 
+        // "filename - folder_name - Visual Studio Code"
+        // "folder_name - Visual Studio Code"
+        
+        global.log("[" + UUID + "] Extracting workspace from title: " + title);
+        
+        if (!title || !title.includes("Visual Studio Code")) {
+            return null;
+        }
+        
+        // Remove "Visual Studio Code" from the end
+        let cleanTitle = title.replace(" - Visual Studio Code", "");
+        
+        // Pattern 1: "filename - workspace (Workspace)"
+        if (cleanTitle.includes("(Workspace)")) {
+            let parts = cleanTitle.split(" - ");
+            for (let i = 0; i < parts.length; i++) {
+                if (parts[i].includes("(Workspace)")) {
+                    let workspace = parts[i].replace(" (Workspace)", "").trim();
+                    global.log("[" + UUID + "] Found workspace pattern: " + workspace);
+                    return workspace;
+                }
             }
         }
+        
+        // Pattern 2: "filename - folder_name" or just "folder_name"
+        let parts = cleanTitle.split(" - ");
+        if (parts.length >= 2) {
+            // Take the last part as potential folder name
+            let potentialFolder = parts[parts.length - 1].trim();
+            global.log("[" + UUID + "] Found potential folder: " + potentialFolder);
+            return potentialFolder;
+        } else if (parts.length === 1) {
+            // Single part, could be just a folder name
+            let potentialFolder = parts[0].trim();
+            global.log("[" + UUID + "] Found single folder: " + potentialFolder);
+            return potentialFolder;
+        }
+        
         return null;
+    },
+    
+    _getVSCodeRecentWorkspace: function() {
+        // Try to get the most recent workspace/folder from VS Code's storage
+        try {
+            let homeDir = GLib.get_home_dir();
+            
+            // Try multiple possible storage locations
+            let possibleStorageFiles = [
+                homeDir + "/.config/Code/storage.json",
+                homeDir + "/.config/Code/User/globalStorage/storage.json",
+                homeDir + "/.vscode/extensions/ms-vscode.vscode-json/package.json", // Alternative
+                homeDir + "/.config/Code/logs/main.log" // Last resort - check recent logs
+            ];
+            
+            let storageFile = null;
+            for (let file of possibleStorageFiles) {
+                if (GLib.file_test(file, GLib.FileTest.EXISTS)) {
+                    storageFile = file;
+                    global.log("[" + UUID + "] Found VS Code storage at: " + file);
+                    break;
+                }
+            }
+            
+            if (!storageFile) {
+                global.log("[" + UUID + "] No VS Code storage files found");
+                // Try to get recent workspace from command line history or recent files
+                return this._getVSCodeRecentFromCLI();
+            }
+            
+            // For now, only handle the main storage.json format
+            if (!storageFile.endsWith('storage.json')) {
+                global.log("[" + UUID + "] Storage file is not storage.json format");
+                return this._getVSCodeRecentFromCLI();
+            }
+            
+            // Read the storage file
+            let file = Gio.File.new_for_path(storageFile);
+            let [success, contents] = file.load_contents(null);
+            
+            if (!success) {
+                global.log("[" + UUID + "] Failed to read VS Code storage.json");
+                return this._getVSCodeRecentFromCLI();
+            }
+            
+            let storageData = JSON.parse(contents.toString());
+            
+            // Look for recent workspaces/folders
+            if (storageData.openedPathsList && storageData.openedPathsList.entries && 
+                storageData.openedPathsList.entries.length > 0) {
+                
+                let recentPath = storageData.openedPathsList.entries[0];
+                if (recentPath.folderUri) {
+                    // It's a folder
+                    let folderPath = recentPath.folderUri.replace("file://", "");
+                    global.log("[" + UUID + "] Found recent folder: " + folderPath);
+                    return folderPath;
+                } else if (recentPath.workspace && recentPath.workspace.configPath) {
+                    // It's a workspace file
+                    let workspacePath = recentPath.workspace.configPath.replace("file://", "");
+                    global.log("[" + UUID + "] Found recent workspace: " + workspacePath);
+                    return workspacePath;
+                }
+            }
+            
+            global.log("[" + UUID + "] No recent workspaces found in storage");
+            return this._getVSCodeRecentFromCLI();
+            
+        } catch (e) {
+            global.log("[" + UUID + "] Error reading VS Code recent workspaces: " + e);
+            return this._getVSCodeRecentFromCLI();
+        }
+    },
+    
+    _getVSCodeRecentFromCLI: function() {
+        // Fallback method: try to get recent workspace from command line
+        try {
+            global.log("[" + UUID + "] Trying to get recent VS Code workspace from CLI");
+            
+            // Check if VS Code has a recent files command
+            let [success, output] = GLib.spawn_command_line_sync('code --list-extensions 2>/dev/null');
+            if (success) {
+                // VS Code is available, we can try to get recent workspaces
+                // For now, just return null and let the restore-last-session handle it
+                global.log("[" + UUID + "] VS Code CLI available, will use --restore-last-session");
+                return null;
+            }
+            
+            global.log("[" + UUID + "] VS Code CLI not available");
+            return null;
+            
+        } catch (e) {
+            global.log("[" + UUID + "] Error getting VS Code recent from CLI: " + e);
+            return null;
+        }
+    },
+    
+    _buildVSCodeCommand: function(workspacePath) {
+        // Build a proper VS Code command with the workspace/folder path
+        if (!workspacePath) {
+            return 'code';
+        }
+        
+        // Check if it's a workspace file (.code-workspace) or a folder
+        if (workspacePath.endsWith('.code-workspace')) {
+            // It's a workspace file
+            global.log("[" + UUID + "] Building command for workspace file: " + workspacePath);
+            return 'code "' + workspacePath + '"';
+        } else {
+            // It's a folder path - check if it exists
+            if (GLib.file_test(workspacePath, GLib.FileTest.IS_DIR)) {
+                global.log("[" + UUID + "] Building command for folder: " + workspacePath);
+                return 'code "' + workspacePath + '"';
+            } else {
+                // Path doesn't exist, try to find it in common locations
+                let homeDir = GLib.get_home_dir();
+                let potentialPaths = [
+                    homeDir + "/" + workspacePath,
+                    homeDir + "/Projects/" + workspacePath,
+                    homeDir + "/projects/" + workspacePath,
+                    homeDir + "/Code/" + workspacePath,
+                    homeDir + "/code/" + workspacePath,
+                    homeDir + "/workspace/" + workspacePath,
+                    homeDir + "/Workspace/" + workspacePath,
+                    homeDir + "/Documents/" + workspacePath,
+                    "/home/" + workspacePath,
+                    "/opt/" + workspacePath
+                ];
+                
+                for (let path of potentialPaths) {
+                    if (GLib.file_test(path, GLib.FileTest.IS_DIR)) {
+                        global.log("[" + UUID + "] Found workspace at: " + path);
+                        return 'code "' + path + '"';
+                    }
+                }
+                
+                global.log("[" + UUID + "] Workspace path not found, using as-is: " + workspacePath);
+                return 'code "' + workspacePath + '"';
+            }
+        }
     },
     
     _positionWindows: function(sessionData) {
