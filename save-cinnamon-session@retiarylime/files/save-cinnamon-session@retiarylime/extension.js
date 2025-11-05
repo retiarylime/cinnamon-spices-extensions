@@ -950,7 +950,7 @@ Terminal=false`;
                     Util.spawn_async([cmd], null);
                 } else {
                     // Regular command
-                    Util.spawn_command_line_async(cmd);
+                    GLib.spawn_command_line_async(cmd);
                 }
                 launched = true;
                 global.log("[" + UUID + "] Successfully launched via command: " + cmd);
@@ -971,7 +971,7 @@ Terminal=false`;
                 
                 for (let desktopFile of desktopFiles) {
                     try {
-                        Util.spawn_command_line_async('gtk-launch ' + desktopFile);
+                        GLib.spawn_command_line_async('gtk-launch ' + desktopFile);
                         launched = true;
                         global.log("[" + UUID + "] Successfully launched via desktop file: " + desktopFile);
                         break;
@@ -1035,11 +1035,11 @@ Terminal=false`;
             try {
                 let path = this._extractPathFromTitle(windowData.title);
                 if (path) {
-                    Util.spawn_command_line_async('nemo "' + path + '"');
+                    GLib.spawn_command_line_async('nemo "' + path + '"');
                     launched = true;
                     global.log("[" + UUID + "] Launched Nemo with path: " + path);
                 } else {
-                    Util.spawn_command_line_async('nemo');
+                    GLib.spawn_command_line_async('nemo');
                     launched = true;
                     global.log("[" + UUID + "] Launched Nemo (default location)");
                 }
@@ -1053,12 +1053,12 @@ Terminal=false`;
                 let workspace = this._extractWorkspaceFromTitle(windowData.title);
                 if (workspace) {
                     global.log("[" + UUID + "] Launching VS Code with workspace: " + workspace);
-                    Util.spawn_command_line_async('code "' + workspace + '"');
+                    GLib.spawn_command_line_async('code "' + workspace + '"');
                     launched = true;
                     global.log("[" + UUID + "] Launched VS Code with workspace: " + workspace);
                 } else {
                     global.log("[" + UUID + "] Launching VS Code with new window");
-                    Util.spawn_command_line_async('code');
+                    GLib.spawn_command_line_async('code');
                     launched = true;
                     global.log("[" + UUID + "] Launched VS Code (new window)");
                 }
@@ -1070,14 +1070,14 @@ Terminal=false`;
             global.log("[" + UUID + "] Entering Terminator launch section");
             try {
                 global.log("[" + UUID + "] Attempting terminator --new-tab command");
-                Util.spawn_command_line_async('terminator --new-tab');
+                GLib.spawn_command_line_async('terminator --new-tab');
                 launched = true;
                 global.log("[" + UUID + "] Launched Terminator (new window)");
             } catch (e) {
                 global.log("[" + UUID + "] First terminator command failed: " + e);
                 try {
                     global.log("[" + UUID + "] Attempting fallback terminator command");
-                    Util.spawn_command_line_async('terminator');
+                    GLib.spawn_command_line_async('terminator');
                     launched = true;
                     global.log("[" + UUID + "] Launched Terminator (fallback)");
                 } catch (e2) {
@@ -1087,12 +1087,12 @@ Terminal=false`;
         } else if (app === "firefox" || app === "Firefox") {
             // For Firefox, open new window
             try {
-                Util.spawn_command_line_async('firefox --new-window');
+                GLib.spawn_command_line_async('firefox --new-window');
                 launched = true;
                 global.log("[" + UUID + "] Launched Firefox (new window)");
             } catch (e) {
                 try {
-                    Util.spawn_command_line_async('firefox');
+                    GLib.spawn_command_line_async('firefox');
                     launched = true;
                     global.log("[" + UUID + "] Launched Firefox (fallback)");
                 } catch (e2) {
@@ -1104,14 +1104,14 @@ Terminal=false`;
             global.log("[" + UUID + "] Entering Brave browser launch section");
             try {
                 global.log("[" + UUID + "] Attempting brave-browser --new-window command");
-                Util.spawn_command_line_async('brave-browser --new-window');
+                GLib.spawn_command_line_async('brave-browser --new-window');
                 launched = true;
                 global.log("[" + UUID + "] Launched Brave (new window)");
             } catch (e) {
                 global.log("[" + UUID + "] First brave command failed: " + e);
                 try {
                     global.log("[" + UUID + "] Attempting fallback brave-browser command");
-                    Util.spawn_command_line_async('brave-browser');
+                    GLib.spawn_command_line_async('brave-browser');
                     launched = true;
                     global.log("[" + UUID + "] Launched Brave (fallback)");
                 } catch (e2) {
