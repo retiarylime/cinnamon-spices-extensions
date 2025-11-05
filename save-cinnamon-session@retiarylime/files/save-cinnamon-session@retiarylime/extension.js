@@ -36,7 +36,8 @@ SaveCinnamonSessionExtension.prototype = {
         this._restoring = false; // flag to avoid overwriting saved session during startup restore
         this._restorationInProgress = false; // prevent concurrent restoration attempts
         this._restorationCompleted = false; // track if restoration is done for this session
-        this._restoredAppsThisSession = new Set(); // track apps restored in this login session        // Set default values first
+        this._restoredAppsThisSession = new Set(); // track apps restored in this login session
+        this._launchedBrowsers = new Set(); // track which browsers we've launched to prevent extra windows        // Set default values first
         this.autoSaveOnLogout = true;
         this.autoRestoreOnLogin = true;
         this.restoreDelay = 5000; // 5 seconds delay before restoring
@@ -808,6 +809,9 @@ Terminal=false`;
     
     _restoreApplications: function(sessionData) {
         let restoredWindows = new Set(); // Track individual windows restored
+        this._launchedBrowsers = new Set(); // Track which browsers we've already launched (reset for each restoration)
+        this._sequentialRestoredCount = 0; // Reset counter for sequential restoration
+        this._sequentialRestoredWindows = new Set(); // Reset set for sequential restoration
         
         // Group windows by application for logging
         let appWindows = {};
@@ -825,64 +829,83 @@ Terminal=false`;
             global.log("[" + UUID + "] " + app + ": " + appWindows[app].length + " windows");
         }
         
-        // Restore each window individually
+        // Restore each window individually with delays
         let windowsToRestore = sessionData.windows.slice(); // Copy array
         let restoredCount = 0;
         
-        for (let i = 0; i < windowsToRestore.length; i++) {
-            let windowData = windowsToRestore[i];
-            let windowId = windowData.app + "_" + windowData.title + "_" + windowData.x + "_" + windowData.y;
+        // Launch windows with staggered timing to prevent browser conflicts
+        this._launchWindowsSequentially(windowsToRestore, appWindows, 0, (finalRestoredCount) => {
+            // Schedule window positioning with longer delay based on number of windows
+            let positioningDelay = Math.max(10000, finalRestoredCount * 2000); // More time for more windows
+            Mainloop.timeout_add(positioningDelay, () => { 
+                this._positionWindows(sessionData);
+                // Release restoration lock after positioning is complete
+                this._restorationInProgress = false;
+                this._restorationCompleted = true; // Mark restoration as completed
+                global.log("[" + UUID + "] Restoration complete - lock released, marked as completed");
+                return false;
+            });
             
-            if (restoredWindows.has(windowId)) {
-                global.log("[" + UUID + "] Skipping duplicate window: " + windowId);
-                continue;
-            }
-            
-            // Check if we already restored this app in this session (but allow multiple windows)
-            let currentWindowCount = this._countApplicationWindows(windowData.app);
-            let expectedWindowCount = appWindows[windowData.app].length;
-            
-            global.log("[" + UUID + "] Restoring window " + (i + 1) + "/" + windowsToRestore.length + ": " + 
-                      windowData.app + " (" + windowData.title + ") - Current: " + currentWindowCount + ", Expected: " + expectedWindowCount);
-            
-            try {
-                // For applications that support multiple windows, we need to launch them multiple times
-                // or use specific launch parameters
-                global.log("[" + UUID + "] About to call _launchApplicationWindow for: " + windowData.app);
-                let launched = this._launchApplicationWindow(windowData);
-                global.log("[" + UUID + "] _launchApplicationWindow returned: " + launched + " for: " + windowData.app);
-                
-                if (launched) {
-                    restoredWindows.add(windowId);
-                    restoredCount++;
-                    this._restoredAppsThisSession.add(windowData.app);
-                    global.log("[" + UUID + "] Successfully launched window: " + windowData.app + " (" + windowData.title + ")");
-                } else {
-                    global.log("[" + UUID + "] Failed to launch window: " + windowData.app + " (" + windowData.title + ")");
-                }
-            } catch (e) {
-                global.log("[" + UUID + "] Exception launching window: " + windowData.app + " - " + e);
-                global.log("[" + UUID + "] Exception stack: " + e.stack);
-            }
-            
-            // Add delay between window launches to avoid overwhelming the system
-            if (i < windowsToRestore.length - 1) {
-                // We'll use setTimeout to add delays, but for now continue synchronously
-            }
+            global.log("[" + UUID + "] Launched " + finalRestoredCount + " windows, positioning in " + positioningDelay + "ms");
+        });
+    },
+    
+    _launchWindowsSequentially: function(windowsToRestore, appWindows, index, callback) {
+        if (index >= windowsToRestore.length) {
+            // All windows processed, call the callback
+            callback(this._sequentialRestoredCount || 0);
+            return;
         }
         
-        // Schedule window positioning with longer delay based on number of windows
-        let positioningDelay = Math.max(10000, restoredCount * 2000); // More time for more windows
-        Mainloop.timeout_add(positioningDelay, () => { 
-            this._positionWindows(sessionData);
-            // Release restoration lock after positioning is complete
-            this._restorationInProgress = false;
-            this._restorationCompleted = true; // Mark restoration as completed
-            global.log("[" + UUID + "] Restoration complete - lock released, marked as completed");
+        let windowData = windowsToRestore[index];
+        let windowId = windowData.app + "_" + windowData.title + "_" + windowData.x + "_" + windowData.y;
+        
+        if (!this._sequentialRestoredCount) this._sequentialRestoredCount = 0;
+        if (!this._sequentialRestoredWindows) this._sequentialRestoredWindows = new Set();
+        
+        if (this._sequentialRestoredWindows.has(windowId)) {
+            global.log("[" + UUID + "] Skipping duplicate window: " + windowId);
+            // Continue to next window immediately
+            this._launchWindowsSequentially(windowsToRestore, appWindows, index + 1, callback);
+            return;
+        }
+        
+        // Check if we already restored this app in this session (but allow multiple windows)
+        let currentWindowCount = this._countApplicationWindows(windowData.app);
+        let expectedWindowCount = appWindows[windowData.app].length;
+        
+        global.log("[" + UUID + "] Restoring window " + (index + 1) + "/" + windowsToRestore.length + ": " + 
+                  windowData.app + " (" + windowData.title + ") - Current: " + currentWindowCount + ", Expected: " + expectedWindowCount);
+        
+        try {
+            global.log("[" + UUID + "] About to call _launchApplicationWindow for: " + windowData.app);
+            let launched = this._launchApplicationWindow(windowData);
+            global.log("[" + UUID + "] _launchApplicationWindow returned: " + launched + " for: " + windowData.app);
+            
+            if (launched) {
+                this._sequentialRestoredWindows.add(windowId);
+                this._sequentialRestoredCount++;
+                this._restoredAppsThisSession.add(windowData.app);
+                global.log("[" + UUID + "] Successfully launched window: " + windowData.app + " (" + windowData.title + ")");
+            } else {
+                global.log("[" + UUID + "] Failed to launch window: " + windowData.app + " (" + windowData.title + ")");
+            }
+        } catch (e) {
+            global.log("[" + UUID + "] Exception launching window: " + windowData.app + " - " + e);
+            global.log("[" + UUID + "] Exception stack: " + e.stack);
+        }
+        
+        // Add delay before launching next window, especially for browsers
+        let delay = 500; // Default 500ms delay
+        if (windowData.app.includes("browser") || windowData.app.includes("firefox") || windowData.app.includes("Brave")) {
+            delay = 1500; // Longer delay for browsers to avoid conflicts
+        }
+        
+        // Continue to next window after delay
+        Mainloop.timeout_add(delay, () => {
+            this._launchWindowsSequentially(windowsToRestore, appWindows, index + 1, callback);
             return false;
         });
-        
-        global.log("[" + UUID + "] Launched " + restoredCount + " windows, positioning in " + positioningDelay + "ms");
     },
 
     // Manual restore function for testing
@@ -1086,13 +1109,34 @@ Terminal=false`;
                 global.log("[" + UUID + "] Failed to launch Terminator: " + e);
             }
         } else if (app === "firefox" || app === "Firefox") {
-            // For Firefox, open new window
+            // For Firefox, handle first launch vs subsequent windows carefully
+            global.log("[" + UUID + "] Entering Firefox launch section");
+            
+            let isFirstFirefoxWindow = !this._launchedBrowsers.has("firefox");
+            let currentFirefoxWindows = this._countApplicationWindows("firefox");
+            
+            global.log("[" + UUID + "] Firefox status - First window: " + isFirstFirefoxWindow + 
+                      ", Current windows: " + currentFirefoxWindows);
+            
             try {
-                GLib.spawn_command_line_async('firefox --new-window');
-                launched = true;
-                global.log("[" + UUID + "] Launched Firefox (new window)");
+                if (isFirstFirefoxWindow && currentFirefoxWindows === 0) {
+                    // First Firefox window - launch without --new-window to avoid extra default window
+                    global.log("[" + UUID + "] Launching first Firefox window (no --new-window)");
+                    GLib.spawn_command_line_async('firefox');
+                    this._launchedBrowsers.add("firefox");
+                    launched = true;
+                    global.log("[" + UUID + "] Launched first Firefox window");
+                } else {
+                    // Subsequent Firefox windows - use --new-window
+                    global.log("[" + UUID + "] Launching additional Firefox window (--new-window)");
+                    GLib.spawn_command_line_async('firefox --new-window');
+                    launched = true;
+                    global.log("[" + UUID + "] Launched additional Firefox window");
+                }
             } catch (e) {
+                global.log("[" + UUID + "] Firefox launch failed: " + e);
                 try {
+                    global.log("[" + UUID + "] Attempting fallback firefox command");
                     GLib.spawn_command_line_async('firefox');
                     launched = true;
                     global.log("[" + UUID + "] Launched Firefox (fallback)");
@@ -1101,13 +1145,30 @@ Terminal=false`;
                 }
             }
         } else if (app === "Brave-browser" || app === "brave-browser") {
-            // For Brave browser, open new window
+            // For Brave browser, handle first launch vs subsequent windows carefully
             global.log("[" + UUID + "] Entering Brave browser launch section");
+            
+            let isFirstBraveWindow = !this._launchedBrowsers.has("Brave-browser");
+            let currentBraveWindows = this._countApplicationWindows("Brave-browser");
+            
+            global.log("[" + UUID + "] Brave status - First window: " + isFirstBraveWindow + 
+                      ", Current windows: " + currentBraveWindows);
+            
             try {
-                global.log("[" + UUID + "] Attempting brave-browser command for new window");
-                GLib.spawn_command_line_async('brave-browser --new-window');
-                launched = true;
-                global.log("[" + UUID + "] Launched Brave (new window)");
+                if (isFirstBraveWindow && currentBraveWindows === 0) {
+                    // First Brave window - launch without --new-window to avoid extra default window
+                    global.log("[" + UUID + "] Launching first Brave browser window (no --new-window)");
+                    GLib.spawn_command_line_async('brave-browser');
+                    this._launchedBrowsers.add("Brave-browser");
+                    launched = true;
+                    global.log("[" + UUID + "] Launched first Brave window");
+                } else {
+                    // Subsequent Brave windows - use --new-window
+                    global.log("[" + UUID + "] Launching additional Brave browser window (--new-window)");
+                    GLib.spawn_command_line_async('brave-browser --new-window');
+                    launched = true;
+                    global.log("[" + UUID + "] Launched additional Brave window");
+                }
             } catch (e) {
                 global.log("[" + UUID + "] First brave command failed: " + e);
                 try {
