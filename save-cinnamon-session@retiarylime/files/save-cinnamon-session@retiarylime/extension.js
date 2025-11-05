@@ -35,6 +35,7 @@ SaveCinnamonSessionExtension.prototype = {
         this._logoutDetected = false;
         this._restoring = false; // flag to avoid overwriting saved session during startup restore
         this._restorationInProgress = false; // prevent concurrent restoration attempts
+        this._restorationCompleted = false; // track if restoration is done for this session
         this._restoredAppsThisSession = new Set(); // track apps restored in this login session        // Set default values first
         this.autoSaveOnLogout = true;
         this.autoRestoreOnLogin = true;
@@ -733,6 +734,13 @@ Terminal=false`;
                 global.log("[" + UUID + "] Restoration already in progress, skipping");
                 return;
             }
+            
+            // Check if we've already successfully restored in this session
+            if (this._restorationCompleted) {
+                global.log("[" + UUID + "] Restoration already completed in this session, skipping");
+                return;
+            }
+            
             this._restorationInProgress = true;
             
             if (!GLib.file_test(this._sessionFile, GLib.FileTest.EXISTS)) {
@@ -869,7 +877,8 @@ Terminal=false`;
             this._positionWindows(sessionData);
             // Release restoration lock after positioning is complete
             this._restorationInProgress = false;
-            global.log("[" + UUID + "] Restoration complete - lock released");
+            this._restorationCompleted = true; // Mark restoration as completed
+            global.log("[" + UUID + "] Restoration complete - lock released, marked as completed");
             return false;
         });
         
@@ -1069,20 +1078,12 @@ Terminal=false`;
             // For terminal, open new window
             global.log("[" + UUID + "] Entering Terminator launch section");
             try {
-                global.log("[" + UUID + "] Attempting terminator --new-tab command");
-                GLib.spawn_command_line_async('terminator --new-tab');
+                global.log("[" + UUID + "] Attempting terminator command for new window");
+                GLib.spawn_command_line_async('terminator');
                 launched = true;
                 global.log("[" + UUID + "] Launched Terminator (new window)");
             } catch (e) {
-                global.log("[" + UUID + "] First terminator command failed: " + e);
-                try {
-                    global.log("[" + UUID + "] Attempting fallback terminator command");
-                    GLib.spawn_command_line_async('terminator');
-                    launched = true;
-                    global.log("[" + UUID + "] Launched Terminator (fallback)");
-                } catch (e2) {
-                    global.log("[" + UUID + "] Failed to launch Terminator: " + e2);
-                }
+                global.log("[" + UUID + "] Failed to launch Terminator: " + e);
             }
         } else if (app === "firefox" || app === "Firefox") {
             // For Firefox, open new window
@@ -1103,7 +1104,7 @@ Terminal=false`;
             // For Brave browser, open new window
             global.log("[" + UUID + "] Entering Brave browser launch section");
             try {
-                global.log("[" + UUID + "] Attempting brave-browser --new-window command");
+                global.log("[" + UUID + "] Attempting brave-browser command for new window");
                 GLib.spawn_command_line_async('brave-browser --new-window');
                 launched = true;
                 global.log("[" + UUID + "] Launched Brave (new window)");
