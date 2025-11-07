@@ -621,7 +621,7 @@ Terminal=false`;
         
         if (this.manualRestoreKeybinding && this.manualRestoreKeybinding !== "") {
             Main.keybindingManager.addHotKey(UUID + "-restore", this.manualRestoreKeybinding, () => {
-                this._restoreSession();
+                this._manualRestore();
             });
             global.log("[" + UUID + "] Restore keybinding set up: " + this.manualRestoreKeybinding);
         }
@@ -1051,7 +1051,15 @@ Terminal=false`;
     // Manual restore function for testing
     _manualRestore: function() {
         global.log("[" + UUID + "] Manual restore triggered");
+        
+        // Temporarily allow manual restoration by clearing completion flag
+        let wasCompleted = this._restorationCompleted;
+        this._restorationCompleted = false;
+        
         this._restoreSession();
+        
+        // Restore the completion flag to previous state
+        this._restorationCompleted = wasCompleted;
     },
     
     _isApplicationRunning: function(appName) {
@@ -1136,13 +1144,36 @@ Terminal=false`;
             'Xlet-settings.py': ['cinnamon-settings extensions'],
             'gnome-terminal-server': ['gnome-terminal', '/usr/bin/gnome-terminal'],
             'thunderbird': ['thunderbird', '/usr/bin/thunderbird'],
+            'org.libreoffice': ['libreoffice', '/usr/bin/libreoffice'],
+            'libreoffice-writer': ['libreoffice --writer', '/usr/bin/libreoffice --writer'],
+            'libreoffice-calc': ['libreoffice --calc', '/usr/bin/libreoffice --calc'],
+            'libreoffice-impress': ['libreoffice --impress', '/usr/bin/libreoffice --impress'],
+            'libreoffice-draw': ['libreoffice --draw', '/usr/bin/libreoffice --draw'],
             'libreoffice': ['libreoffice', '/usr/bin/libreoffice'],
             'gedit': ['gedit', '/usr/bin/gedit'],
             'nautilus': ['nautilus', '/usr/bin/nautilus']
         };
         
-        // Get possible commands for this app
-        let commands = appCommands[app] || [app, app.toLowerCase()];
+        // Special handling for LibreOffice applications based on WM class
+        if (app === 'org.libreoffice' && windowData.wmClass) {
+            let wmClass = windowData.wmClass.toLowerCase();
+            if (wmClass === 'libreoffice-writer') {
+                commands = ['libreoffice --writer', '/usr/bin/libreoffice --writer'];
+            } else if (wmClass === 'libreoffice-calc') {
+                commands = ['libreoffice --calc', '/usr/bin/libreoffice --calc'];
+            } else if (wmClass === 'libreoffice-impress') {
+                commands = ['libreoffice --impress', '/usr/bin/libreoffice --impress'];
+            } else if (wmClass === 'libreoffice-draw') {
+                commands = ['libreoffice --draw', '/usr/bin/libreoffice --draw'];
+            } else {
+                // Fall back to generic libreoffice
+                commands = ['libreoffice', '/usr/bin/libreoffice'];
+            }
+            global.log("[" + UUID + "] LibreOffice detected - using specific command for " + wmClass);
+        } else {
+            // Get possible commands for this app
+            commands = appCommands[app] || [app, app.toLowerCase()];
+        }
         
         // Method 1: Try known command mappings
         for (let cmd of commands) {
