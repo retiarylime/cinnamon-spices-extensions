@@ -88,12 +88,12 @@ SaveCinnamonSessionExtension.prototype = {
         // Check for login restoration with delayed attempts to handle autostart timing
         global.log("[" + UUID + "] Scheduling login detection attempts...");
         
-        // Multiple attempts to check for login markers (autostart scripts run with delay)
+        // Multiple attempts to check for login markers (optimized for speed)
         let loginCheckAttempts = [
-            { delay: 1000, name: "Immediate check" },     // 1s - catch existing markers
-            { delay: 5000, name: "Early check" },         // 5s - wait for fast autostart  
-            { delay: 10000, name: "Main check" },         // 10s - main autostart window
-            { delay: 15000, name: "Late check" }          // 15s - final safety net
+            { delay: 100, name: "Instant check" },        // 0.1s - immediate
+            { delay: 500, name: "Quick check" },          // 0.5s - very fast  
+            { delay: 1500, name: "Fast check" },          // 1.5s - autostart should be done
+            { delay: 3000, name: "Safety check" }         // 3s - final safety net
         ];
         
         for (let i = 0; i < loginCheckAttempts.length; i++) {
@@ -212,12 +212,12 @@ SaveCinnamonSessionExtension.prototype = {
         
         global.log("[" + UUID + "] SESSION RESTORE STARTING");
         
-        // Start restoration process with staggered timing for reliability
+        // Start restoration process with optimized timing for speed
         let restoreAttempts = [
-            { delay: 3000, name: "Quick restore" },      // 3 seconds - catch early desktop
-            { delay: 8000, name: "Main restore" },       // 8 seconds - main attempt  
-            { delay: 15000, name: "Delayed restore" },   // 15 seconds - after full desktop load
-            { delay: 25000, name: "Final restore" }      // 25 seconds - final safety net
+            { delay: 500, name: "Instant restore" },     // 0.5s - immediate attempt
+            { delay: 1500, name: "Quick restore" },      // 1.5s - desktop should be ready
+            { delay: 3000, name: "Main restore" },       // 3s - main attempt  
+            { delay: 6000, name: "Final restore" }       // 6s - final safety net
         ];
         
     global.log("[" + UUID + "] Scheduling " + restoreAttempts.length + " restoration attempts");
@@ -585,7 +585,7 @@ Exec=/bin/bash -c 'echo $EPOCHSECONDS > "$HOME/.cinnamon-session-login-marker" 2
 Hidden=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
-X-GNOME-Autostart-Delay=3
+X-GNOME-Autostart-Delay=0
 StartupNotify=false
 Terminal=false`;
             
@@ -1024,10 +1024,10 @@ Terminal=false`;
             global.log("[" + UUID + "] Exception stack: " + e.stack);
         }
         
-        // Add delay before launching next window, especially for browsers
-        let delay = 500; // Default 500ms delay
+        // Add delay before launching next window (optimized for speed)
+        let delay = 200; // Fast 200ms delay
         if (windowData.app.includes("browser") || windowData.app.includes("firefox") || windowData.app.includes("Brave")) {
-            delay = 1500; // Longer delay for browsers to avoid conflicts
+            delay = 800; // Shorter browser delay for faster restoration
         }
         
         // Continue to next window after delay
