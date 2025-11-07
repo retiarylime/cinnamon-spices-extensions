@@ -816,6 +816,17 @@ Terminal=false`;
                     windowData.vscodeWorkspace = extractedWorkspace;
                     global.log("[" + UUID + "] Captured VS Code workspace: " + extractedWorkspace);
                 }
+                
+                // Try to capture the full workspace path from VS Code's current working directory
+                try {
+                    let fullWorkspacePath = this._getVSCodeWorkspacePath(pid);
+                    if (fullWorkspacePath) {
+                        windowData.vscodeWorkspacePath = fullWorkspacePath;
+                        global.log("[" + UUID + "] Captured VS Code full path: " + fullWorkspacePath);
+                    }
+                } catch (e) {
+                    global.log("[" + UUID + "] Could not get VS Code workspace path: " + e);
+                }
             }
             
             // Create a unique key for duplicate detection - use PID and window handle for better uniqueness
@@ -1242,15 +1253,24 @@ Terminal=false`;
             // For VS Code, try to open with the most recent workspace/folder
             global.log("[" + UUID + "] Entering VS Code launch section");
             try {
-                // Priority 1: Use stored workspace from saved session
+                // Priority 1: Use full workspace path if available
+                let fullWorkspacePath = windowData.vscodeWorkspacePath;
+                // Priority 2: Use stored workspace name from saved session
                 let storedWorkspace = windowData.vscodeWorkspace;
-                // Priority 2: Extract workspace from current title
+                // Priority 3: Extract workspace from current title
                 let extractedWorkspace = this._extractWorkspaceFromTitle(windowData.title);
-                // Priority 3: Get most recent workspace from VS Code storage
+                // Priority 4: Get most recent workspace from VS Code storage
                 let recentWorkspace = this._getVSCodeRecentWorkspace();
                 
-                if (storedWorkspace) {
-                    // Use the workspace that was stored when the session was saved
+                if (fullWorkspacePath) {
+                    // Use the full workspace path that was captured during session save
+                    global.log("[" + UUID + "] Launching VS Code with full workspace path: " + fullWorkspacePath);
+                    let command = this._buildVSCodeCommand(fullWorkspacePath);
+                    GLib.spawn_command_line_async(command);
+                    launched = true;
+                    global.log("[" + UUID + "] Launched VS Code with full workspace path");
+                } else if (storedWorkspace) {
+                    // Use the workspace name that was stored when the session was saved
                     global.log("[" + UUID + "] Launching VS Code with stored workspace: " + storedWorkspace);
                     let command = this._buildVSCodeCommand(storedWorkspace);
                     GLib.spawn_command_line_async(command);
@@ -1554,6 +1574,7 @@ Terminal=false`;
                 let homeDir = GLib.get_home_dir();
                 let potentialPaths = [
                     homeDir + "/" + workspacePath,
+                    homeDir + "/.github/" + workspacePath,  // Add .github directory  
                     homeDir + "/Projects/" + workspacePath,
                     homeDir + "/projects/" + workspacePath,
                     homeDir + "/Code/" + workspacePath,
@@ -1561,6 +1582,9 @@ Terminal=false`;
                     homeDir + "/workspace/" + workspacePath,
                     homeDir + "/Workspace/" + workspacePath,
                     homeDir + "/Documents/" + workspacePath,
+                    homeDir + "/git/" + workspacePath,       // Add common git directory
+                    homeDir + "/Github/" + workspacePath,    // Add Github directory
+                    homeDir + "/github/" + workspacePath,    // Add github directory
                     "/home/" + workspacePath,
                     "/opt/" + workspacePath
                 ];
@@ -1576,6 +1600,35 @@ Terminal=false`;
                 return 'code "' + workspacePath + '"';
             }
         }
+    },
+    
+    _getVSCodeWorkspacePath: function(pid) {
+        // Try to get the actual working directory of the VS Code process
+        try {
+            let [success, cwd] = GLib.file_get_contents('/proc/' + pid + '/cwd');
+            if (success) {
+                let workingDir = GLib.filename_to_utf8(cwd, -1, null, null, null)[0];
+                if (workingDir && GLib.file_test(workingDir, GLib.FileTest.IS_DIR)) {
+                    global.log("[" + UUID + "] Found VS Code working directory: " + workingDir);
+                    return workingDir;
+                }
+            }
+        } catch (e) {
+            // /proc method failed, try alternative approach
+            try {
+                let [success, stdout, stderr, exit_status] = GLib.spawn_command_line_sync('readlink /proc/' + pid + '/cwd');
+                if (success && exit_status === 0) {
+                    let workingDir = new TextDecoder().decode(stdout).trim();
+                    if (workingDir && GLib.file_test(workingDir, GLib.FileTest.IS_DIR)) {
+                        global.log("[" + UUID + "] Found VS Code working directory via readlink: " + workingDir);
+                        return workingDir;
+                    }
+                }
+            } catch (e2) {
+                global.log("[" + UUID + "] Could not determine VS Code working directory: " + e2);
+            }
+        }
+        return null;
     },
     
     _positionWindows: function(sessionData) {
