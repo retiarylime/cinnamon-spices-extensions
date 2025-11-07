@@ -36,6 +36,7 @@ SaveCinnamonSessionExtension.prototype = {
         this._restoring = false; // flag to avoid overwriting saved session during startup restore
         this._restorationInProgress = false; // prevent concurrent restoration attempts
         this._restorationCompleted = false; // track if restoration is done for this session
+        this._loginDetected = false; // track if login was detected during this enable
         this._restoredAppsThisSession = new Set(); // track apps restored in this login session
         this._launchedBrowsers = new Set(); // track which browsers we've launched to prevent extra windows        // Set default values first
         this.autoSaveOnLogout = true;
@@ -66,8 +67,11 @@ SaveCinnamonSessionExtension.prototype = {
     
     enable: function() {
         global.log("[" + UUID + "] Enabling extension");
-        // Mark that we are in startup restore phase to avoid auto-saving and overwriting
+        // Reset restoration flags on each enable
         this._restoring = true;
+        this._restorationInProgress = false;
+        this._restorationCompleted = false;
+        this._loginDetected = false;
         
         // Connect to session management signals
         this._connectSessionSignals();
@@ -81,11 +85,121 @@ SaveCinnamonSessionExtension.prototype = {
             return false;
         });
         
-        // Check for login restoration with multiple attempts for reliability
-        this._attemptSessionRestore();
+        // Check for login restoration with delayed attempts to handle autostart timing
+        global.log("[" + UUID + "] Scheduling login detection attempts...");
+        
+        // Multiple attempts to check for login markers (autostart scripts run with delay)
+        let loginCheckAttempts = [
+            { delay: 1000, name: "Immediate check" },     // 1s - catch existing markers
+            { delay: 5000, name: "Early check" },         // 5s - wait for fast autostart  
+            { delay: 10000, name: "Main check" },         // 10s - main autostart window
+            { delay: 15000, name: "Late check" }          // 15s - final safety net
+        ];
+        
+        for (let i = 0; i < loginCheckAttempts.length; i++) {
+            let attempt = loginCheckAttempts[i];
+            Mainloop.timeout_add(attempt.delay, () => {
+                global.log("[" + UUID + "] " + attempt.name + " for login marker...");
+                
+                // Only check if we haven't already detected login
+                if (this._restoring && !this._loginDetected) {
+                    let isActualLogin = this._isLoginRestore();
+                    global.log("[" + UUID + "] " + attempt.name + " result: " + isActualLogin);
+                    
+                    if (isActualLogin) {
+                        this._loginDetected = true;
+                        global.log("[" + UUID + "] LOGIN RESTORE DETECTED - calling _attemptSessionRestore");
+                        this._attemptSessionRestore();
+                    } else if (i === loginCheckAttempts.length - 1) {
+                        // Last attempt failed - clear restoring flag
+                        global.log("[" + UUID + "] All login checks failed - clearing restore phase");
+                        this._restoring = false;
+                        this._loginDetected = false;
+                    }
+                }
+                return false;
+            });
+        }
+    },
+    
+    _isLoginRestore: function() {
+        global.log("[" + UUID + "] _isLoginRestore called - checking for login");
+        
+        // First try the marker-based approach
+        let markerFile = GLib.get_home_dir() + "/.cinnamon-session-login-marker";
+        global.log("[" + UUID + "] Checking for login marker at: " + markerFile);
+        global.log("[" + UUID + "] File exists check: " + GLib.file_test(markerFile, GLib.FileTest.EXISTS));
+        
+        if (GLib.file_test(markerFile, GLib.FileTest.EXISTS)) {
+            try {
+                let [success, contents] = GLib.file_get_contents(markerFile);
+                if (success) {
+                    let contentStr = contents.toString().trim();
+                    global.log("[" + UUID + "] Login marker content: '" + contentStr + "' (length: " + contentStr.length + ")");
+                    
+                    if (contentStr.length > 0) {
+                        let markerTime = parseInt(contentStr);
+                        if (!isNaN(markerTime)) {
+                            let currentTime = Math.floor(Date.now() / 1000);
+                            let timeDiff = currentTime - markerTime;
+                            
+                            global.log("[" + UUID + "] Login marker time: " + markerTime + ", current: " + currentTime + ", diff: " + timeDiff + "s");
+                            
+                            if (timeDiff < 600) { // 10 minutes
+                                // Delete the marker to prevent repeated restores
+                                GLib.unlink(markerFile);
+                                global.log("[" + UUID + "] Login marker is recent - DELETING MARKER AND RETURNING TRUE");
+                                return true;
+                            } else {
+                                global.log("[" + UUID + "] Login marker is too old (" + timeDiff + "s) - RETURNING FALSE");
+                                return false;
+                            }
+                        } else {
+                            global.log("[" + UUID + "] Login marker contains invalid timestamp: " + contentStr);
+                        }
+                    } else {
+                        global.log("[" + UUID + "] Login marker is empty");
+                    }
+                } else {
+                    global.log("[" + UUID + "] Failed to read login marker file");
+                }
+            } catch (e) {
+                global.log("[" + UUID + "] Error checking login marker: " + e);
+            }
+        } else {
+            global.log("[" + UUID + "] No login marker found");
+        }
+        
+        // Fallback: Check system uptime
+        try {
+            let uptimeFile = "/proc/uptime";
+            if (GLib.file_test(uptimeFile, GLib.FileTest.EXISTS)) {
+                let [success, contents] = GLib.file_get_contents(uptimeFile);
+                if (success) {
+                    let uptimeStr = contents.toString().split(' ')[0]; // First field is uptime in seconds
+                    let uptime = parseFloat(uptimeStr);
+                    
+                    global.log("[" + UUID + "] System uptime: " + uptime + " seconds");
+                    
+                    if (uptime < 300) { // Less than 5 minutes
+                        global.log("[" + UUID + "] System uptime is low (" + uptime + "s) - likely a fresh login, triggering restore");
+                        return true;
+                    } else {
+                        global.log("[" + UUID + "] System uptime is high (" + uptime + "s) - not a fresh login");
+                    }
+                }
+            }
+        } catch (e) {
+            global.log("[" + UUID + "] Error checking system uptime: " + e);
+        }
+        
+        global.log("[" + UUID + "] No login restore detected");
+        return false;
     },
     
     _attemptSessionRestore: function() {
+        global.log("[" + UUID + "] _attemptSessionRestore called - autoRestoreOnLogin: " + this.autoRestoreOnLogin);
+        
         if (!this.autoRestoreOnLogin) {
             global.log("[" + UUID + "] Auto-restore on login is disabled");
             return;
@@ -461,17 +575,17 @@ WantedBy=shutdown.target`;
     },
     
     _createAutostartEntry: function() {
-        // Create an autostart entry that triggers session restoration
+        // Create an autostart entry that creates login marker for session restoration
         try {
             let autostartContent = `[Desktop Entry]
 Type=Application
 Name=Cinnamon Session Restore
-Comment=Restore saved Cinnamon session on login
-Exec=bash -c "sleep 8 && if [ -f ~/.cinnamon-session-save.json ]; then dbus-send --session --type=method_call --dest=org.Cinnamon /org/Cinnamon org.Cinnamon.RestoreSession 2>/dev/null || ~/.cinnamon-session-restore.sh; fi"
+Comment=Create login marker for session restore
+Exec=/bin/bash -c 'echo $EPOCHSECONDS > "$HOME/.cinnamon-session-login-marker" 2>/dev/null || echo $(date +%s) > "$HOME/.cinnamon-session-login-marker"; echo "Autostart executed at $(date)" >> "$HOME/.cinnamon-session-autostart.log"'
 Hidden=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
-X-GNOME-Autostart-Delay=8
+X-GNOME-Autostart-Delay=3
 StartupNotify=false
 Terminal=false`;
             
@@ -491,7 +605,7 @@ Terminal=false`;
             stream.write_bytes(bytes, null);
             stream.close(null);
             
-            global.log("[" + UUID + "] Enhanced autostart entry created for session restoration");
+            global.log("[" + UUID + "] Login marker autostart entry created for session restoration");
         } catch (e) {
             global.log("[" + UUID + "] Could not create autostart entry: " + e);
         }
