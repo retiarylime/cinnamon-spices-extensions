@@ -1225,6 +1225,59 @@ Terminal=false`;
         return launched;
     },
     
+    _getVSCodeMostRecent: function() {
+        // Read VS Code's global storage to get the most recently used workspace or folder
+        try {
+            let vscodeStoragePath = GLib.get_home_dir() + "/.config/Code/User/globalStorage/storage.json";
+            if (!GLib.file_test(vscodeStoragePath, GLib.FileTest.EXISTS)) {
+                global.log("[" + UUID + "] VS Code storage not found");
+                return null;
+            }
+            
+            let file = Gio.File.new_for_path(vscodeStoragePath);
+            let [success, contents] = file.load_contents(null);
+            if (!success) {
+                global.log("[" + UUID + "] Failed to read VS Code storage");
+                return null;
+            }
+            
+            let storageData = JSON.parse(contents);
+            if (storageData.windowsState && storageData.windowsState.lastActiveWindow) {
+                let lastWindow = storageData.windowsState.lastActiveWindow;
+                
+                // Check if it was a workspace file
+                if (lastWindow.workspaceIdentifier && lastWindow.workspaceIdentifier.configURIPath) {
+                    let workspacePath = lastWindow.workspaceIdentifier.configURIPath.replace(/^file:\/\//, '');
+                    global.log("[" + UUID + "] VS Code most recent: workspace file " + workspacePath);
+                    return { type: 'workspace', path: workspacePath };
+                }
+                
+                // Check if it was a folder (could be in different locations)
+                if (lastWindow.folderUri) {
+                    let folderPath = lastWindow.folderUri.replace(/^file:\/\//, '');
+                    global.log("[" + UUID + "] VS Code most recent: folder " + folderPath);
+                    return { type: 'folder', path: folderPath };
+                }
+                
+                // Sometimes folder info is stored differently - check backup folders
+                if (lastWindow.backupPath && storageData.backupWorkspaces && storageData.backupWorkspaces.folders) {
+                    let recentFolder = storageData.backupWorkspaces.folders[0]; // Most recent folder
+                    if (recentFolder && recentFolder.folderUri) {
+                        let folderPath = recentFolder.folderUri.replace(/^file:\/\//, '');
+                        global.log("[" + UUID + "] VS Code most recent: backup folder " + folderPath);
+                        return { type: 'folder', path: folderPath };
+                    }
+                }
+            }
+            
+            global.log("[" + UUID + "] No recent VS Code workspace/folder found in lastActiveWindow");
+            return null;
+        } catch (e) {
+            global.log("[" + UUID + "] Error reading VS Code recent items: " + e);
+            return null;
+        }
+    },
+    
     _launchApplicationWindow: function(windowData) {
         let launched = false;
         let app = windowData.app;
@@ -1254,15 +1307,30 @@ Terminal=false`;
             global.log("[" + UUID + "] Entering VS Code launch section");
             try {
                 // Priority 1: Use full workspace path if available
+                // Priority 1: Get the most recent workspace/folder from VS Code storage (what user actually used last)
+                let mostRecent = this._getVSCodeMostRecent();
+                // Priority 2: Use full workspace path that was captured during session save
                 let fullWorkspacePath = windowData.vscodeWorkspacePath;
-                // Priority 2: Use stored workspace name from saved session
+                // Priority 3: Use stored workspace name from saved session
                 let storedWorkspace = windowData.vscodeWorkspace;
-                // Priority 3: Extract workspace from current title
+                // Priority 4: Extract workspace from current title
                 let extractedWorkspace = this._extractWorkspaceFromTitle(windowData.title);
-                // Priority 4: Get most recent workspace from VS Code storage
-                let recentWorkspace = this._getVSCodeRecentWorkspace();
                 
-                if (fullWorkspacePath) {
+                if (mostRecent) {
+                    // Use VS Code's most recently used workspace/folder (highest priority)
+                    global.log("[" + UUID + "] Launching VS Code with most recent " + mostRecent.type + ": " + mostRecent.path);
+                    let command;
+                    if (mostRecent.type === 'workspace') {
+                        // Open workspace file
+                        command = 'code "' + mostRecent.path + '"';
+                    } else {
+                        // Open folder
+                        command = 'code "' + mostRecent.path + '"';
+                    }
+                    GLib.spawn_command_line_async(command);
+                    launched = true;
+                    global.log("[" + UUID + "] Launched VS Code with most recent " + mostRecent.type);
+                } else if (fullWorkspacePath) {
                     // Use the full workspace path that was captured during session save
                     global.log("[" + UUID + "] Launching VS Code with full workspace path: " + fullWorkspacePath);
                     let command = this._buildVSCodeCommand(fullWorkspacePath);
@@ -1283,13 +1351,6 @@ Terminal=false`;
                     GLib.spawn_command_line_async(command);
                     launched = true;
                     global.log("[" + UUID + "] Launched VS Code with extracted workspace");
-                } else if (recentWorkspace) {
-                    // Open the most recent workspace/folder
-                    global.log("[" + UUID + "] Launching VS Code with recent workspace: " + recentWorkspace);
-                    let command = this._buildVSCodeCommand(recentWorkspace);
-                    GLib.spawn_command_line_async(command);
-                    launched = true;
-                    global.log("[" + UUID + "] Launched VS Code with recent workspace");
                 } else {
                     // Try to restore the last session automatically
                     global.log("[" + UUID + "] Launching VS Code with last session restore");
