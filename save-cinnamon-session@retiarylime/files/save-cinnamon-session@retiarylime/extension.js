@@ -364,10 +364,13 @@ fi`;
             });
         }
         
-        // Call cleanup function
+        // Call cleanup function to remove current PID file
         if (this._cleanupFunction) {
             this._cleanupFunction();
         }
+        
+        // Also do a general cleanup of old session files
+        this._cleanupOldSessionFiles();
         
         // Clean up timeouts
         if (this._saveTimeout) {
@@ -667,32 +670,109 @@ WantedBy=shutdown.target`;
             
             let homeDir = GLib.get_home_dir();
             
-            // Use shell command to find and clean up old session files (keep only 4 newest to make room for new one)
-            let cleanupScript = 'cd "' + homeDir + '" && ' +
-                               'FILES=($(ls -t .cinnamon-session-running-* 2>/dev/null)) && ' +
-                               'TOTAL=${#FILES[@]} && ' +
-                               'if [ $TOTAL -gt 4 ]; then ' +
-                               '  echo "Cleaning up $((TOTAL-4)) old session files" && ' +
-                               '  for ((i=4; i<TOTAL; i++)); do ' +
-                               '    echo "Removing: ${FILES[i]}" && ' +
-                               '    rm -f "${FILES[i]}" ' +
-                               '  done ' +
-                               'fi && ' +
-                               'echo "Session files remaining: $(ls .cinnamon-session-running-* 2>/dev/null | wc -l)"';
-            
-            let [success, output, error] = GLib.spawn_command_line_sync('bash -c \'' + cleanupScript + '\'');
-            
-            if (success) {
-                let result = output.toString().trim();
-                if (result) {
-                    global.log("[" + UUID + "] Session file cleanup result: " + result);
+            // Use a more robust cleanup approach with GLib directly
+            try {
+                let dir = Gio.File.new_for_path(homeDir);
+                let enumerator = dir.enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
+                let files = [];
+                let fileInfo;
+                
+                // Collect all session running files with their timestamps
+                while ((fileInfo = enumerator.next_file(null))) {
+                    let name = fileInfo.get_name();
+                    if (name.startsWith('.cinnamon-session-running-')) {
+                        let file = dir.get_child(name);
+                        let info = file.query_info('time::modified', Gio.FileQueryInfoFlags.NONE, null);
+                        let timestamp = info.get_modification_time().tv_sec;
+                        files.push({name: name, timestamp: timestamp, file: file});
+                    }
                 }
-            } else {
-                global.log("[" + UUID + "] Session file cleanup failed: " + (error ? error.toString() : "unknown error"));
+                enumerator.close(null);
+                
+                // Sort by timestamp (newest first)
+                files.sort((a, b) => b.timestamp - a.timestamp);
+                
+                global.log("[" + UUID + "] Found " + files.length + " session tracking files");
+                
+                // Keep only the 4 newest files, remove the rest
+                if (files.length > 4) {
+                    let toRemove = files.length - 4;
+                    global.log("[" + UUID + "] Cleaning up " + toRemove + " old session files");
+                    
+                    for (let i = 4; i < files.length; i++) {
+                        try {
+                            files[i].file.delete(null);
+                            global.log("[" + UUID + "] Removed: " + files[i].name);
+                        } catch (e) {
+                            global.log("[" + UUID + "] Failed to remove " + files[i].name + ": " + e);
+                        }
+                    }
+                    
+                    global.log("[" + UUID + "] Session files remaining: " + Math.min(4, files.length));
+                } else {
+                    global.log("[" + UUID + "] No cleanup needed, " + files.length + " files <= 4");
+                }
+                
+            } catch (e) {
+                global.log("[" + UUID + "] Error during file cleanup: " + e);
+                // Fallback to shell command method
+                this._cleanupOldSessionFilesShell(homeDir);
             }
             
         } catch (e) {
             global.log("[" + UUID + "] Error during session file cleanup: " + e);
+        }
+    },
+    
+    _cleanupOldSessionFilesShell: function(homeDir) {
+        try {
+            global.log("[" + UUID + "] Using shell fallback for cleanup...");
+            
+            // Create a temporary script file to avoid shell escaping issues
+            let scriptContent = `#!/bin/bash
+cd "${homeDir}"
+mapfile -t FILES < <(ls -t .cinnamon-session-running-* 2>/dev/null)
+TOTAL=\${#FILES[@]}
+if [ \$TOTAL -gt 4 ]; then
+    echo "Cleaning up \$((TOTAL-4)) old session files"
+    for ((i=4; i<TOTAL; i++)); do
+        echo "Removing: \${FILES[i]}"
+        rm -f "\${FILES[i]}"
+    done
+fi
+REMAINING=\$(ls .cinnamon-session-running-* 2>/dev/null | wc -l)
+echo "Session files remaining: \$REMAINING"
+`;
+            
+            let scriptFile = Gio.File.new_for_path(homeDir + '/.cinnamon-session-cleanup.sh');
+            let stream = scriptFile.replace(null, false, Gio.FileCreateFlags.NONE, null);
+            stream.write(scriptContent, null);
+            stream.close(null);
+            
+            // Make it executable
+            GLib.spawn_command_line_sync('chmod +x "' + homeDir + '/.cinnamon-session-cleanup.sh"');
+            
+            // Execute it
+            let [success, output, error] = GLib.spawn_command_line_sync('"' + homeDir + '/.cinnamon-session-cleanup.sh"');
+            
+            if (success) {
+                let result = output.toString().trim();
+                if (result) {
+                    global.log("[" + UUID + "] Shell cleanup result: " + result);
+                }
+            } else {
+                global.log("[" + UUID + "] Shell cleanup failed: " + (error ? error.toString() : "unknown error"));
+            }
+            
+            // Clean up the script file
+            try {
+                scriptFile.delete(null);
+            } catch (e) {
+                // Ignore cleanup errors
+            }
+            
+        } catch (e) {
+            global.log("[" + UUID + "] Error during shell cleanup: " + e);
         }
     },
     
