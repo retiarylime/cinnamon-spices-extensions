@@ -1263,6 +1263,21 @@ echo "Session tracking files remaining: $REMAINING"
                 }
             }
             
+            // For Xed (text editor), try to extract and store document information
+            if ((app === "org.x.editor" || app === "Xed" || app === "xed" ||
+                 (windowData.wmClass && windowData.wmClass.toLowerCase() === "xed")) && 
+                pid) {
+                
+                let extractedDocument = this._extractXedDocumentPath(windowData.title, pid);
+                if (extractedDocument) {
+                    windowData.xedDocument = extractedDocument;
+                    global.log("[" + UUID + "] Captured Xed document: " + extractedDocument);
+                    
+                    // Store the full path
+                    windowData.xedDocumentPath = extractedDocument;
+                }
+            }
+            
             // Create a unique key for duplicate detection - use PID and window handle for better uniqueness
             let windowHandle = window.get_stable_sequence ? window.get_stable_sequence() : window.get_id();
             let windowKey = app + "|" + windowData.title + "|" + pid + "|" + windowHandle;
@@ -1882,6 +1897,40 @@ echo "Session tracking files remaining: $REMAINING"
             }
             global.log("[" + UUID + "] Nemo detected - using directory-aware command");
         
+        // Special handling for Xed (text editor)
+        } else if (app === 'Xed' || app === 'org.x.editor' || app === 'xed' ||
+                   (windowData && windowData.wmClass && windowData.wmClass.toLowerCase() === 'xed')) {
+            
+            // Check if we have a specific document to restore
+            if (windowData && windowData.xedDocumentPath) {
+                commands = ['xed "' + windowData.xedDocumentPath + '"', 
+                           '/usr/bin/xed "' + windowData.xedDocumentPath + '"'];
+                global.log("[" + UUID + "] Xed - launching with document: " + windowData.xedDocumentPath);
+            } else if (windowData && windowData.xedDocument) {
+                // Try to find the document in recent files  
+                let recentDoc = this._getXedRecentDocument(windowData.xedDocument);
+                if (recentDoc) {
+                    commands = ['xed "' + recentDoc + '"', 
+                               '/usr/bin/xed "' + recentDoc + '"'];
+                    global.log("[" + UUID + "] Xed - found and launching recent document: " + recentDoc);
+                } else {
+                    commands = ['xed', '/usr/bin/xed'];
+                    global.log("[" + UUID + "] Xed - document not found, launching without document");
+                }
+            } else {
+                // No specific document, check for most recent text file
+                let recentDoc = this._getXedRecentDocument(null);
+                if (recentDoc) {
+                    commands = ['xed "' + recentDoc + '"', 
+                               '/usr/bin/xed "' + recentDoc + '"'];
+                    global.log("[" + UUID + "] Xed - launching with most recent document: " + recentDoc);
+                } else {
+                    commands = ['xed', '/usr/bin/xed'];
+                    global.log("[" + UUID + "] Xed - no recent documents found, launching empty");
+                }
+            }
+            global.log("[" + UUID + "] Xed detected - using document-aware command");
+        
         } else {
             // Get possible commands for this app
             commands = appCommands[app] || [app, app.toLowerCase()];
@@ -2203,6 +2252,47 @@ echo "Session tracking files remaining: $REMAINING"
                 }
             } catch (e) {
                 global.log("[" + UUID + "] Failed to launch Xreader: " + e);
+            }
+        } else if (app === "org.x.editor" || app === "Xed" || app === "xed" ||
+                   (windowData.wmClass && windowData.wmClass.toLowerCase() === "xed")) {
+            // For Xed (text editor), try to open with the specific document
+            try {
+                let documentPath = null;
+                
+                global.log("[" + UUID + "] Detected Xed text editor");
+                
+                // Priority 1: Use full document path if available
+                if (windowData.xedDocumentPath) {
+                    documentPath = windowData.xedDocumentPath;
+                    global.log("[" + UUID + "] Using saved document path: " + documentPath);
+                } else if (windowData.xedDocument) {
+                    // Priority 2: Try to find the document in recent files
+                    documentPath = this._getXedRecentDocument(windowData.xedDocument);
+                    if (documentPath) {
+                        global.log("[" + UUID + "] Found document in recent files: " + documentPath);
+                    }
+                } else {
+                    // Priority 3: Use most recent text document
+                    let recentDoc = this._getXedRecentDocument(null);
+                    if (recentDoc) {
+                        documentPath = recentDoc;
+                        global.log("[" + UUID + "] Using most recent document: " + documentPath);
+                    }
+                }
+                
+                if (documentPath && GLib.file_test(documentPath, GLib.FileTest.EXISTS)) {
+                    // Launch with specific document
+                    GLib.spawn_command_line_async('xed "' + documentPath + '"');
+                    launched = true;
+                    global.log("[" + UUID + "] Launched Xed with document: " + documentPath);
+                } else {
+                    // Launch without specific document
+                    GLib.spawn_command_line_async('xed');
+                    launched = true;
+                    global.log("[" + UUID + "] Launched Xed (no document or document not found)");
+                }
+            } catch (e) {
+                global.log("[" + UUID + "] Failed to launch Xed: " + e);
             }
         } else if (app === "Code") {
             // For VS Code, try to open with the most recent workspace/folder
@@ -2973,6 +3063,195 @@ echo "Session tracking files remaining: $REMAINING"
         return cleanTitle;
     },
     
+    _extractXedDocumentPath: function(title, pid) {
+        // Extract document file path from Xed window title (preferred) or process command line
+        global.log("[" + UUID + "] Extracting Xed document from title: '" + title + "' and PID: " + pid);
+        
+        // Method 1: Extract from window title (most accurate for current active document)
+        if (title) {
+            let extractedFromTitle = this._extractXedDocumentFromTitle(title);
+            if (extractedFromTitle) {
+                global.log("[" + UUID + "] Successfully extracted from title: " + extractedFromTitle);
+                return extractedFromTitle;
+            }
+        }
+        
+        // Method 2: Fall back to command line arguments if title extraction fails
+        if (pid) {
+            let extractedFromCmdline = this._extractXedDocumentFromCmdline(pid);
+            if (extractedFromCmdline) {
+                global.log("[" + UUID + "] Successfully extracted from command line: " + extractedFromCmdline);
+                return extractedFromCmdline;
+            }
+        }
+        
+        global.log("[" + UUID + "] No document path extracted for Xed");
+        return null;
+    },
+    
+    _extractXedDocumentFromTitle: function(title) {
+        // Extract document file path from Xed window title
+        // Common patterns:
+        // "filename.txt (~/path)"
+        // "filename.py (/full/path)"
+        // "Untitled Document 1"
+        // "New Document"
+        
+        if (!title) {
+            return null;
+        }
+        
+        global.log("[" + UUID + "] Analyzing Xed title: " + title);
+        
+        // Skip generic titles
+        if (title.toLowerCase().match(/^(xed|untitled|new document)(\s|$)/)) {
+            global.log("[" + UUID + "] Skipping generic Xed title: " + title);
+            return null;
+        }
+        
+        // Pattern: "filename.ext (~/path)" or "filename.ext (/full/path)"
+        let match = title.match(/^(.+?)\s+\(([^)]+)\)$/);
+        if (match) {
+            let filename = match[1].trim();
+            let pathInfo = match[2].trim();
+            
+            global.log("[" + UUID + "] Found filename: '" + filename + "' and path: '" + pathInfo + "'");
+            
+            let fullPath = null;
+            
+            // Handle tilde paths like "~/Downloads"
+            if (pathInfo.startsWith("~/")) {
+                let homeDir = GLib.get_home_dir();
+                fullPath = homeDir + "/" + pathInfo.substring(2) + "/" + filename;
+            } 
+            // Handle full paths like "/home/user/Documents"  
+            else if (pathInfo.startsWith("/")) {
+                fullPath = pathInfo + "/" + filename;
+            }
+            // Handle relative paths
+            else {
+                let homeDir = GLib.get_home_dir();
+                fullPath = homeDir + "/" + pathInfo + "/" + filename;
+            }
+            
+            // Verify the file exists
+            if (fullPath && GLib.file_test(fullPath, GLib.FileTest.EXISTS)) {
+                global.log("[" + UUID + "] Found valid Xed document: " + fullPath);
+                return fullPath;
+            } else {
+                global.log("[" + UUID + "] File doesn't exist: " + fullPath);
+            }
+        }
+        
+        // If no path info in parentheses, try to find the file in common locations
+        let filename = title.trim();
+        if (filename && !filename.includes("(") && !filename.toLowerCase().match(/^(xed|untitled|new document)$/)) {
+            // Search common directories
+            let homeDir = GLib.get_home_dir();
+            let searchPaths = [
+                homeDir + "/Documents/" + filename,
+                homeDir + "/Downloads/" + filename,
+                homeDir + "/Desktop/" + filename,
+                homeDir + "/" + filename
+            ];
+            
+            for (let searchPath of searchPaths) {
+                if (GLib.file_test(searchPath, GLib.FileTest.EXISTS)) {
+                    global.log("[" + UUID + "] Found Xed document in common location: " + searchPath);
+                    return searchPath;
+                }
+            }
+        }
+        
+        global.log("[" + UUID + "] Could not extract document from Xed title: " + title);
+        return null;
+    },
+    
+    _extractXedDocumentFromCmdline: function(pid) {
+        // Extract document file path from Xed process command line arguments
+        
+        if (!pid) {
+            return null;
+        }
+        
+        global.log("[" + UUID + "] Extracting Xed document from command line for PID: " + pid);
+        
+        try {
+            // Get command line arguments from /proc/PID/cmdline
+            let cmdlinePath = "/proc/" + pid + "/cmdline";
+            
+            if (!GLib.file_test(cmdlinePath, GLib.FileTest.EXISTS)) {
+                global.log("[" + UUID + "] Process cmdline not found: " + cmdlinePath);
+                return null;
+            }
+            
+            let file = Gio.File.new_for_path(cmdlinePath);
+            let [success, contents] = file.load_contents(null);
+            
+            if (!success) {
+                global.log("[" + UUID + "] Failed to read cmdline for PID: " + pid);
+                return null;
+            }
+            
+            // Convert Uint8Array to proper string and split on null bytes
+            let cmdlineData = "";
+            for (let i = 0; i < contents.length; i++) {
+                if (contents[i] === 0) {
+                    cmdlineData += "|";  // Use | as separator
+                } else {
+                    cmdlineData += String.fromCharCode(contents[i]);
+                }
+            }
+            
+            let args = cmdlineData.split('|').filter(arg => arg.length > 0);
+            
+            global.log("[" + UUID + "] Xed command line args: " + JSON.stringify(args));
+            
+            // Look for file arguments (skip the executable name)
+            for (let i = 1; i < args.length; i++) {
+                let arg = args[i];
+                
+                // Skip flags and options
+                if (arg.startsWith('-')) {
+                    continue;
+                }
+                
+                // Check if it's a file path
+                if (arg.includes('/') || !arg.includes('=')) {
+                    // Expand relative paths to absolute paths
+                    if (!arg.startsWith('/')) {
+                        try {
+                            let homeDir = GLib.get_home_dir();
+                            if (arg.startsWith('~')) {
+                                arg = arg.replace('~', homeDir);
+                            } else {
+                                // Try to resolve relative to home directory
+                                arg = homeDir + '/' + arg;
+                            }
+                        } catch (e) {
+                            // If expansion fails, use as-is
+                        }
+                    }
+                    
+                    // Verify the file exists
+                    if (GLib.file_test(arg, GLib.FileTest.EXISTS)) {
+                        global.log("[" + UUID + "] Found Xed document: " + arg);
+                        return arg;
+                    } else {
+                        global.log("[" + UUID + "] Xed file argument doesn't exist: " + arg);
+                    }
+                }
+            }
+            
+            global.log("[" + UUID + "] No valid file found in Xed command line");
+            return null;
+            
+        } catch (e) {
+            global.log("[" + UUID + "] Error extracting Xed document path: " + e);
+            return null;
+        }
+    },
+    
     _getLibreOfficeRecentDocument: function(targetFileName) {
         // Get the most recently edited LibreOffice document
         try {
@@ -3197,6 +3476,140 @@ echo "Session tracking files remaining: $REMAINING"
             
         } catch (e) {
             global.log("[" + UUID + "] Error reading recent documents: " + e);
+            return null;
+        }
+    },
+    
+    _getXedRecentDocument: function(targetFileName) {
+        // Get the most recently opened text file from Xed's recent files
+        try {
+            let homeDir = GLib.get_home_dir();
+            
+            // Xed uses GTK's recently-used.xbel file
+            let recentPaths = [
+                homeDir + "/.local/share/recently-used.xbel",
+                homeDir + "/.recently-used.xbel"
+            ];
+            
+            let recentFiles = [];
+            
+            for (let recentPath of recentPaths) {
+                if (!GLib.file_test(recentPath, GLib.FileTest.EXISTS)) {
+                    continue;
+                }
+                
+                let file = Gio.File.new_for_path(recentPath);
+                let [success, contents] = file.load_contents(null);
+                
+                if (!success) {
+                    continue;
+                }
+                
+                let recentData = contents.toString();
+                global.log("[" + UUID + "] Checking recent files in: " + recentPath);
+                
+                // Parse XBEL format (XML) for recent files with xed group
+                // Look for bookmark entries with file:// hrefs and xed group
+                let bookmarkPattern = /<bookmark\s+href="file:\/\/\/([^"]+)"[\s\S]*?<bookmark:group>xed<\/bookmark:group>/g;
+                let match;
+                
+                while ((match = bookmarkPattern.exec(recentData)) !== null) {
+                    let filePath = "/" + decodeURIComponent(match[1]); // Add leading slash back
+                    
+                    // Filter for text file extensions (common ones)
+                    if (filePath.match(/\.(txt|md|py|js|html|css|json|xml|yaml|yml|conf|cfg|log|sh|bat|c|cpp|h|hpp|java|php|rb|go|rs|swift|kt|ts|tsx|jsx|vue|svelte|sql|r|pl|scala|clj|hs|elm|lua|dart)$/i) ||
+                        !filePath.includes('.')) { // Also include files without extensions
+                        
+                        // Check if file still exists
+                        if (GLib.file_test(filePath, GLib.FileTest.EXISTS)) {
+                            recentFiles.push(filePath);
+                            global.log("[" + UUID + "] Found recent text file: " + filePath);
+                        }
+                    }
+                }
+            }
+            
+            // Also try to find text files in common directories if no recent files found
+            if (recentFiles.length === 0) {
+                let commonTextDirs = [
+                    homeDir + "/Documents",
+                    homeDir + "/Downloads", 
+                    homeDir + "/Desktop",
+                    homeDir
+                ];
+                
+                for (let textDir of commonTextDirs) {
+                    try {
+                        if (GLib.file_test(textDir, GLib.FileTest.EXISTS)) {
+                            // Look for common text file extensions
+                            let [success, output] = GLib.spawn_command_line_sync('find "' + textDir + '" -maxdepth 2 \\( -name "*.txt" -o -name "*.md" -o -name "*.py" -o -name "*.js" -o -name "*.json" -o -name "*.xml" -o -name "*.html" -o -name "*.css" -o -name "*.conf" -o -name "*.log" \\) -type f -printf "%T@ %p\\n" 2>/dev/null | sort -nr | head -10');
+                            if (success) {
+                                let lines = output.toString().trim().split('\n');
+                                for (let line of lines) {
+                                    if (line.includes(' ')) {
+                                        let filePath = line.substring(line.indexOf(' ') + 1);
+                                        if (filePath && GLib.file_test(filePath, GLib.FileTest.EXISTS)) {
+                                            recentFiles.push(filePath);
+                                            global.log("[" + UUID + "] Found text file in " + textDir + ": " + filePath);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        // Ignore errors scanning directories
+                    }
+                }
+            }
+            
+            // Remove duplicates and keep only unique files
+            recentFiles = [...new Set(recentFiles)];
+            
+            // If we have a target filename, try to find it
+            if (targetFileName) {
+                for (let filePath of recentFiles) {
+                    // Try multiple matching strategies
+                    let fileName = filePath.split('/').pop(); // Get just the filename
+                    
+                    // Strategy 1: Exact filename match
+                    if (fileName === targetFileName || filePath === targetFileName) {
+                        global.log("[" + UUID + "] Found exact filename match: " + filePath);
+                        return filePath;
+                    }
+                    
+                    // Strategy 2: Case-insensitive filename match
+                    if (fileName.toLowerCase() === targetFileName.toLowerCase()) {
+                        global.log("[" + UUID + "] Found case-insensitive filename match: " + filePath);
+                        return filePath;
+                    }
+                    
+                    // Strategy 3: Filename contains the target (for partial matches)
+                    if (fileName.includes(targetFileName) || targetFileName.includes(fileName)) {
+                        global.log("[" + UUID + "] Found partial filename match: " + filePath);
+                        return filePath;
+                    }
+                    
+                    // Strategy 4: Full path contains the target
+                    if (filePath.includes(targetFileName)) {
+                        global.log("[" + UUID + "] Found path containing target: " + filePath);
+                        return filePath;
+                    }
+                }
+                
+                global.log("[" + UUID + "] No matching text file found for: " + targetFileName);
+            }
+            
+            // Return the most recent text file (first in list)
+            if (recentFiles.length > 0) {
+                global.log("[" + UUID + "] Using most recent text file: " + recentFiles[0]);
+                return recentFiles[0];
+            }
+            
+            global.log("[" + UUID + "] No recent text files found");
+            return null;
+            
+        } catch (e) {
+            global.log("[" + UUID + "] Error reading recent text files: " + e);
             return null;
         }
     },
