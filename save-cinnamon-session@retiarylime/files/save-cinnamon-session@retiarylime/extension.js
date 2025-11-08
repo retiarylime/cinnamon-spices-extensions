@@ -1250,6 +1250,19 @@ echo "Session tracking files remaining: $REMAINING"
                 }
             }
             
+            // For Nemo (file manager), try to extract and store directory information
+            if ((app === "org.Nemo" || app === "Nemo" || 
+                 (windowData.wmClass && windowData.wmClass.toLowerCase() === "nemo")) && 
+                windowData.title) {
+                
+                let extractedPath = this._extractNemoDirectoryPath(windowData.title, pid);
+                if (extractedPath) {
+                    windowData.nemoDirectory = windowData.title; // Store the title for reference
+                    windowData.nemoDirectoryPath = extractedPath;
+                    global.log("[" + UUID + "] Captured Nemo directory: " + windowData.title + " -> " + extractedPath);
+                }
+            }
+            
             // Create a unique key for duplicate detection - use PID and window handle for better uniqueness
             let windowHandle = window.get_stable_sequence ? window.get_stable_sequence() : window.get_id();
             let windowKey = app + "|" + windowData.title + "|" + pid + "|" + windowHandle;
@@ -1835,6 +1848,40 @@ echo "Session tracking files remaining: $REMAINING"
             }
             global.log("[" + UUID + "] Xreader detected - using document-aware command");
         
+        // Special handling for Nemo (file manager)
+        } else if (app === 'Nemo' || app === 'org.Nemo' || 
+                   (windowData && windowData.wmClass && windowData.wmClass.toLowerCase() === 'nemo')) {
+            
+            // Check if we have a specific directory to restore
+            if (windowData && windowData.nemoDirectoryPath) {
+                commands = ['nemo "' + windowData.nemoDirectoryPath + '"', 
+                           '/usr/bin/nemo "' + windowData.nemoDirectoryPath + '"'];
+                global.log("[" + UUID + "] Nemo - launching with directory: " + windowData.nemoDirectoryPath);
+            } else if (windowData && windowData.nemoDirectory) {
+                // Try to resolve the directory from the saved title
+                let resolvedPath = this._extractNemoDirectoryPath(windowData.nemoDirectory, null);
+                if (resolvedPath) {
+                    commands = ['nemo "' + resolvedPath + '"', 
+                               '/usr/bin/nemo "' + resolvedPath + '"'];
+                    global.log("[" + UUID + "] Nemo - resolved and launching with directory: " + resolvedPath);
+                } else {
+                    commands = ['nemo', '/usr/bin/nemo'];
+                    global.log("[" + UUID + "] Nemo - directory not resolved, launching default");
+                }
+            } else {
+                // No specific directory, check for most recent directory
+                let recentDir = this._getNemoRecentDirectories(null);
+                if (recentDir) {
+                    commands = ['nemo "' + recentDir + '"', 
+                               '/usr/bin/nemo "' + recentDir + '"'];
+                    global.log("[" + UUID + "] Nemo - launching with most recent directory: " + recentDir);
+                } else {
+                    commands = ['nemo', '/usr/bin/nemo'];
+                    global.log("[" + UUID + "] Nemo - no recent directories found, launching default");
+                }
+            }
+            global.log("[" + UUID + "] Nemo detected - using directory-aware command");
+        
         } else {
             // Get possible commands for this app
             commands = appCommands[app] || [app, app.toLowerCase()];
@@ -1983,17 +2030,55 @@ echo "Session tracking files remaining: $REMAINING"
         
         // Special handling for applications that support specific window opening
         if (app === "org.Nemo" || app === "Nemo") {
-            // For file manager, try to open the specific location
+            // For file manager, try to open the specific location with enhanced resolution
             try {
-                let path = this._extractPathFromTitle(windowData.title);
-                if (path) {
-                    GLib.spawn_command_line_async('nemo "' + path + '"');
+                let directoryPath = null;
+                
+                global.log("[" + UUID + "] Detected Nemo file manager");
+                
+                // Priority 1: Use saved directory path if available
+                if (windowData.nemoDirectoryPath) {
+                    directoryPath = windowData.nemoDirectoryPath;
+                    global.log("[" + UUID + "] Using saved directory path: " + directoryPath);
+                } else if (windowData.nemoDirectory) {
+                    // Priority 2: Try to resolve from saved directory title
+                    directoryPath = this._extractNemoDirectoryPath(windowData.nemoDirectory, null);
+                    if (directoryPath) {
+                        global.log("[" + UUID + "] Resolved directory from title '" + windowData.nemoDirectory + "' to: " + directoryPath);
+                    }
+                } else if (windowData.title) {
+                    // Priority 3: Try to resolve from current title (fallback)
+                    directoryPath = this._extractNemoDirectoryPath(windowData.title, windowData.pid);
+                    if (directoryPath) {
+                        global.log("[" + UUID + "] Resolved directory from title: " + directoryPath);
+                    } else {
+                        // Fallback to old method
+                        directoryPath = this._extractPathFromTitle(windowData.title);
+                        if (directoryPath) {
+                            global.log("[" + UUID + "] Used legacy path extraction: " + directoryPath);
+                        }
+                    }
+                }
+                
+                // Priority 4: Use most recent directory if no specific path found
+                if (!directoryPath) {
+                    let recentDir = this._getNemoRecentDirectories(null);
+                    if (recentDir) {
+                        directoryPath = recentDir;
+                        global.log("[" + UUID + "] Using most recent directory: " + directoryPath);
+                    }
+                }
+                
+                if (directoryPath && GLib.file_test(directoryPath, GLib.FileTest.IS_DIR)) {
+                    // Launch with specific directory
+                    GLib.spawn_command_line_async('nemo "' + directoryPath + '"');
                     launched = true;
-                    global.log("[" + UUID + "] Launched Nemo with path: " + path);
+                    global.log("[" + UUID + "] Launched Nemo with directory: " + directoryPath);
                 } else {
+                    // Launch without specific directory
                     GLib.spawn_command_line_async('nemo');
                     launched = true;
-                    global.log("[" + UUID + "] Launched Nemo (default location)");
+                    global.log("[" + UUID + "] Launched Nemo (default location - no valid directory found)");
                 }
             } catch (e) {
                 global.log("[" + UUID + "] Failed to launch Nemo: " + e);
@@ -2288,6 +2373,295 @@ echo "Session tracking files remaining: $REMAINING"
             return "/tmp";
         }
         return null;
+    },
+    
+    _extractNemoDirectoryPath: function(title, pid) {
+        // Extract directory path from Nemo window title with advanced resolution
+        // Common patterns: "Home", "Documents", "Downloads", "tmp", "share", etc.
+        
+        if (!title) {
+            return null;
+        }
+        
+        global.log("[" + UUID + "] Extracting Nemo directory from title: " + title);
+        
+        // Handle special cases first
+        if (title === "Home") {
+            let homePath = GLib.get_home_dir();
+            global.log("[" + UUID + "] Resolved 'Home' to: " + homePath);
+            return homePath;
+        }
+        
+        if (title === "Computer" || title === "File System") {
+            global.log("[" + UUID + "] Resolved '" + title + "' to root filesystem");
+            return "/";
+        }
+        
+        // If it's already a full path, return it
+        if (title.startsWith("/")) {
+            global.log("[" + UUID + "] Title is already a full path: " + title);
+            return title;
+        }
+        
+        // Primary method: Try to resolve common directory names first (more reliable)
+        let resolvedPath = this._resolveCommonDirectoryName(title);
+        if (resolvedPath) {
+            global.log("[" + UUID + "] Resolved common directory '" + title + "' to: " + resolvedPath);
+            return resolvedPath;
+        }
+        
+        // Secondary method: Try to get the actual working directory from the process (less reliable for Nemo)
+        let actualPath = this._getNemoWorkingDirectory(pid);
+        if (actualPath && !actualPath.includes("cinnamon") && !actualPath.includes("extension")) {
+            // Only use if it doesn't look like an extension directory
+            global.log("[" + UUID + "] Got actual working directory from process: " + actualPath);
+            return actualPath;
+        }
+        
+        // Tertiary method: search for directories with matching names
+        let searchedPath = this._searchForDirectoryName(title);
+        if (searchedPath) {
+            global.log("[" + UUID + "] Found directory by search '" + title + "' at: " + searchedPath);
+            return searchedPath;
+        }
+        
+        global.log("[" + UUID + "] Could not resolve directory path for: " + title);
+        return null;
+    },
+    
+    _getNemoWorkingDirectory: function(pid) {
+        // Try to get the actual working directory from the Nemo process
+        try {
+            if (!pid) return null;
+            
+            // Method 1: Read from /proc/<pid>/cwd symlink
+            let cwdPath = "/proc/" + pid + "/cwd";
+            if (GLib.file_test(cwdPath, GLib.FileTest.EXISTS)) {
+                try {
+                    let [success, output] = GLib.spawn_command_line_sync('readlink "' + cwdPath + '"');
+                    if (success && output.length > 0) {
+                        let path = output.toString().trim();
+                        if (path && GLib.file_test(path, GLib.FileTest.IS_DIR)) {
+                            return path;
+                        }
+                    }
+                } catch (e) {
+                    // Continue to next method
+                }
+            }
+            
+            // Method 2: Use lsof to find open directories
+            try {
+                let [success, output] = GLib.spawn_command_line_sync('lsof -p ' + pid + ' +D / 2>/dev/null | grep " DIR " | head -1');
+                if (success && output.length > 0) {
+                    let lines = output.toString().trim().split('\n');
+                    for (let line of lines) {
+                        let parts = line.split(/\s+/);
+                        if (parts.length > 8) {
+                            let path = parts[parts.length - 1];
+                            if (path && path.startsWith('/') && GLib.file_test(path, GLib.FileTest.IS_DIR)) {
+                                return path;
+                            }
+                        }
+                    }
+                }
+            } catch (e) {
+                // Continue to next method
+            }
+            
+        } catch (e) {
+            global.log("[" + UUID + "] Error getting working directory for PID " + pid + ": " + e);
+        }
+        
+        return null;
+    },
+    
+    _resolveCommonDirectoryName: function(dirName) {
+        // Resolve common directory names to their full paths
+        let homeDir = GLib.get_home_dir();
+        
+        // Common home subdirectories
+        let homeSubdirs = {
+            'Desktop': homeDir + '/Desktop',
+            'Documents': homeDir + '/Documents', 
+            'Downloads': homeDir + '/Downloads',
+            'Music': homeDir + '/Music',
+            'Pictures': homeDir + '/Pictures',
+            'Public': homeDir + '/Public',
+            'Templates': homeDir + '/Templates',
+            'Videos': homeDir + '/Videos'
+        };
+        
+        // Check home subdirectories first
+        if (homeSubdirs[dirName] && GLib.file_test(homeSubdirs[dirName], GLib.FileTest.IS_DIR)) {
+            return homeSubdirs[dirName];
+        }
+        
+        // Common system directories
+        let systemDirs = {
+            'tmp': '/tmp',
+            'var': '/var',
+            'usr': '/usr',
+            'opt': '/opt',
+            'etc': '/etc',
+            'home': '/home',
+            'root': '/root',
+            'bin': '/bin',
+            'sbin': '/sbin',
+            'lib': '/lib',
+            'boot': '/boot',
+            'dev': '/dev',
+            'proc': '/proc',
+            'sys': '/sys',
+            'run': '/run',
+            'media': '/media',
+            'mnt': '/mnt',
+            'srv': '/srv',
+            'share': '/usr/share',
+            'local': '/usr/local',
+            'lib64': '/lib64'
+        };
+        
+        if (systemDirs[dirName] && GLib.file_test(systemDirs[dirName], GLib.FileTest.IS_DIR)) {
+            return systemDirs[dirName];
+        }
+        
+        return null;
+    },
+    
+    _searchForDirectoryName: function(dirName) {
+        // Search for directories with the given name in common locations
+        let searchPaths = [
+            GLib.get_home_dir(),
+            '/',
+            '/usr',
+            '/var',
+            '/opt'
+        ];
+        
+        for (let searchPath of searchPaths) {
+            try {
+                // Use find to search for directories with this name (limit depth for performance)
+                let [success, output] = GLib.spawn_command_line_sync('find "' + searchPath + '" -maxdepth 3 -type d -name "' + dirName + '" 2>/dev/null | head -5');
+                if (success && output.length > 0) {
+                    let lines = output.toString().trim().split('\n');
+                    for (let line of lines) {
+                        let path = line.trim();
+                        if (path && GLib.file_test(path, GLib.FileTest.IS_DIR)) {
+                            // Prefer paths closer to common locations
+                            if (path.startsWith(GLib.get_home_dir()) || path.startsWith('/usr') || path === '/' + dirName) {
+                                return path;
+                            }
+                        }
+                    }
+                    // If no preferred path found, return the first valid one
+                    if (lines.length > 0 && lines[0].trim()) {
+                        let firstPath = lines[0].trim();
+                        if (GLib.file_test(firstPath, GLib.FileTest.IS_DIR)) {
+                            return firstPath;
+                        }
+                    }
+                }
+            } catch (e) {
+                // Continue searching in other paths
+            }
+        }
+        
+        return null;
+    },
+    
+    _getNemoRecentDirectories: function(targetDirName) {
+        // Get recently accessed directories from various sources
+        try {
+            let recentDirs = [];
+            let homeDir = GLib.get_home_dir();
+            
+            // Method 1: Check GTK recent files for directory access patterns
+            let recentFilesPath = homeDir + "/.local/share/recently-used.xbel";
+            if (GLib.file_test(recentFilesPath, GLib.FileTest.EXISTS)) {
+                let file = Gio.File.new_for_path(recentFilesPath);
+                let [success, contents] = file.load_contents(null);
+                
+                if (success) {
+                    let recentData = contents.toString();
+                    // Extract directory paths from file URLs
+                    let dirPattern = /file:\/\/\/([^"]+)/g;
+                    let match;
+                    let seenDirs = new Set();
+                    
+                    while ((match = dirPattern.exec(recentData)) !== null) {
+                        let filePath = "/" + decodeURIComponent(match[1]);
+                        let dirPath = filePath.substring(0, filePath.lastIndexOf('/'));
+                        
+                        if (dirPath && GLib.file_test(dirPath, GLib.FileTest.IS_DIR) && !seenDirs.has(dirPath)) {
+                            seenDirs.add(dirPath);
+                            recentDirs.push(dirPath);
+                        }
+                    }
+                }
+            }
+            
+            // Method 2: Check shell history for cd commands
+            try {
+                let historyFiles = [homeDir + "/.bash_history", homeDir + "/.zsh_history"];
+                for (let histFile of historyFiles) {
+                    if (GLib.file_test(histFile, GLib.FileTest.EXISTS)) {
+                        let [success, output] = GLib.spawn_command_line_sync('grep "cd " "' + histFile + '" 2>/dev/null | tail -20');
+                        if (success && output.length > 0) {
+                            let lines = output.toString().trim().split('\n');
+                            for (let line of lines) {
+                                let match = line.match(/cd\s+(.+)$/);
+                                if (match) {
+                                    let path = match[1].trim().replace(/^["']|["']$/g, ''); // Remove quotes
+                                    if (path.startsWith('~/')) {
+                                        path = homeDir + path.substring(1);
+                                    } else if (!path.startsWith('/')) {
+                                        continue; // Skip relative paths we can't resolve
+                                    }
+                                    
+                                    if (GLib.file_test(path, GLib.FileTest.IS_DIR)) {
+                                        recentDirs.push(path);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (e) {
+                // Continue with other methods
+            }
+            
+            // Remove duplicates and sort by preference (home directories first)
+            recentDirs = [...new Set(recentDirs)];
+            recentDirs.sort((a, b) => {
+                if (a.startsWith(homeDir) && !b.startsWith(homeDir)) return -1;
+                if (!a.startsWith(homeDir) && b.startsWith(homeDir)) return 1;
+                return b.length - a.length; // Prefer more specific paths
+            });
+            
+            // If we have a target directory name, try to find it
+            if (targetDirName) {
+                for (let dirPath of recentDirs) {
+                    let dirName = dirPath.split('/').pop();
+                    if (dirName === targetDirName || dirPath.endsWith('/' + targetDirName)) {
+                        global.log("[" + UUID + "] Found matching recent directory: " + dirPath);
+                        return dirPath;
+                    }
+                }
+            }
+            
+            // Return the most recent directory
+            if (recentDirs.length > 0) {
+                global.log("[" + UUID + "] Using most recent directory: " + recentDirs[0]);
+                return recentDirs[0];
+            }
+            
+            return null;
+            
+        } catch (e) {
+            global.log("[" + UUID + "] Error getting recent directories: " + e);
+            return null;
+        }
     },
     
     _extractWorkspaceFromTitle: function(title) {
