@@ -38,11 +38,14 @@ SaveCinnamonSessionExtension.prototype = {
         this._restorationCompleted = false; // track if restoration is done for this session
         this._loginDetected = false; // track if login was detected during this enable
         this._restoredAppsThisSession = new Set(); // track apps restored in this login session
-        this._launchedBrowsers = new Set(); // track which browsers we've launched to prevent extra windows        // Set default values first
+        this._launchedBrowsers = new Set(); // track which browsers we've launched to prevent extra windows
+        this._previousExcludedApps = ""; // track previous exclusion list to detect changes
+        
+        // Set default values first
         this.autoSaveOnLogout = true;
         this.autoRestoreOnLogin = true;
         this.restoreDelay = 5000; // 5 seconds delay before restoring
-        this.excludedApps = "cinnamon-settings,cinnamon-killer-daemon";
+        this.excludedApps = "cinnamon-settings,cinnamon-killer-daemon,nemo-desktop";
         this.manualSaveKeybinding = "<Super><Shift>s";
         this.manualRestoreKeybinding = "<Super><Shift>r";
         this.debugMode = true; // Enable debug mode by default for better troubleshooting
@@ -57,6 +60,9 @@ SaveCinnamonSessionExtension.prototype = {
             this.settings.bind("manual-save-keybinding", "manualSaveKeybinding", this._onKeybindingChanged);
             this.settings.bind("manual-restore-keybinding", "manualRestoreKeybinding", this._onKeybindingChanged);
             this.settings.bind("debug-mode", "debugMode", this._onSettingsChanged);
+            
+            // Store initial excluded apps list for change detection
+            this._previousExcludedApps = this.excludedApps;
         } catch (e) {
             global.log("[" + UUID + "] Settings binding failed, using defaults: " + e);
         }
@@ -394,13 +400,139 @@ fi`;
     
     _onSettingsChanged: function() {
         global.log("[" + UUID + "] Settings changed - auto-save: " + this.autoSaveOnLogout + 
-                   ", auto-restore: " + this.autoRestoreOnLogin + ", delay: " + this.restoreDelay + "ms");
+                   ", auto-restore: " + this.autoRestoreOnLogin + ", delay: " + this.restoreDelay + "ms" +
+                   ", excluded-apps: '" + this.excludedApps + "'");
+        
+        // Check if excluded apps list has changed
+        if (this._previousExcludedApps !== this.excludedApps) {
+            global.log("[" + UUID + "] Excluded apps changed from '" + this._previousExcludedApps + "' to '" + this.excludedApps + "'");
+            this._handleExclusionChanges(this._previousExcludedApps, this.excludedApps);
+            this._previousExcludedApps = this.excludedApps;
+        }
     },
     
     _onKeybindingChanged: function() {
         // Clean up old keybindings and set up new ones
         this._cleanupKeybindings();
         this._setupKeybindings();
+    },
+    
+    _handleExclusionChanges: function(previousExcluded, currentExcluded) {
+        try {
+            global.log("[" + UUID + "] Handling exclusion changes...");
+            
+            // Parse the exclusion lists
+            let previousApps = previousExcluded.split(',').map(app => app.trim().toLowerCase()).filter(app => app.length > 0);
+            let currentApps = currentExcluded.split(',').map(app => app.trim().toLowerCase()).filter(app => app.length > 0);
+            
+            // Find newly added exclusions
+            let newlyExcluded = currentApps.filter(app => !previousApps.includes(app));
+            
+            if (newlyExcluded.length > 0) {
+                global.log("[" + UUID + "] Newly excluded applications: " + newlyExcluded.join(', '));
+                
+                // Remove newly excluded applications from saved session
+                this._removeExcludedAppsFromSession(newlyExcluded);
+                
+                // Show notification about the changes
+                this._showNotification("Exclusion Updated", 
+                    "Removed " + newlyExcluded.join(', ') + " from saved session");
+            } else {
+                global.log("[" + UUID + "] No new exclusions detected");
+            }
+        } catch (e) {
+            global.logError("[" + UUID + "] Error handling exclusion changes: " + e);
+        }
+    },
+    
+    _removeExcludedAppsFromSession: function(excludedApps) {
+        try {
+            // Check if session file exists
+            if (!GLib.file_test(this._sessionFile, GLib.FileTest.EXISTS)) {
+                global.log("[" + UUID + "] No session file exists to clean up");
+                return;
+            }
+            
+            // Read current session data
+            let file = Gio.File.new_for_path(this._sessionFile);
+            let [success, contents] = file.load_contents(null);
+            
+            if (!success) {
+                global.log("[" + UUID + "] Failed to read session file for cleanup");
+                return;
+            }
+            
+            let sessionData = JSON.parse(contents);
+            
+            if (!sessionData.windows || !Array.isArray(sessionData.windows)) {
+                global.log("[" + UUID + "] Invalid session data structure for cleanup");
+                return;
+            }
+            
+            let originalWindowCount = sessionData.windows.length;
+            global.log("[" + UUID + "] Original session contains " + originalWindowCount + " windows");
+            
+            // Filter out excluded applications
+            sessionData.windows = sessionData.windows.filter(windowData => {
+                let app = (windowData.app || '').toLowerCase();
+                let title = (windowData.title || '').toLowerCase();
+                let wmClass = (windowData.wmClass || '').toLowerCase();
+                let wmClassInstance = (windowData.wmClassInstance || '').toLowerCase();
+                
+                // Check if this window matches any newly excluded app
+                let shouldRemove = excludedApps.some(excluded => {
+                    let excludedLower = excluded.toLowerCase();
+                    
+                    // Check multiple identifiers for matches (same logic as in _collectSessionData)
+                    return app.includes(excludedLower) || 
+                           title.includes(excludedLower) ||
+                           wmClass.includes(excludedLower) ||
+                           wmClassInstance.includes(excludedLower) ||
+                           // Exact matches for better precision
+                           app === excludedLower ||
+                           wmClass === excludedLower ||
+                           wmClassInstance === excludedLower;
+                });
+                
+                if (shouldRemove) {
+                    global.log("[" + UUID + "] Removing excluded window: " + windowData.app + " (" + windowData.title + ")");
+                }
+                
+                return !shouldRemove; // Keep windows that are NOT excluded
+            });
+            
+            let removedCount = originalWindowCount - sessionData.windows.length;
+            global.log("[" + UUID + "] Removed " + removedCount + " windows from session");
+            
+            // Update workspace window counts
+            sessionData.workspaces = {};
+            for (let windowData of sessionData.windows) {
+                let workspaceIndex = windowData.workspace;
+                if (!sessionData.workspaces[workspaceIndex]) {
+                    sessionData.workspaces[workspaceIndex] = {
+                        name: "Workspace " + (workspaceIndex + 1),
+                        windowCount: 0
+                    };
+                }
+                sessionData.workspaces[workspaceIndex].windowCount++;
+            }
+            
+            // Save the updated session data
+            let jsonData = JSON.stringify(sessionData, null, 2);
+            let stream = file.replace(null, false, Gio.FileCreateFlags.NONE, null);
+            let bytes = new GLib.Bytes(jsonData);
+            stream.write_bytes(bytes, null);
+            stream.close(null);
+            
+            global.log("[" + UUID + "] Updated session file: " + sessionData.windows.length + " windows remaining");
+            
+            if (removedCount > 0) {
+                global.log("[" + UUID + "] Successfully removed " + removedCount + " excluded applications from saved session");
+            }
+            
+        } catch (e) {
+            global.logError("[" + UUID + "] Error removing excluded apps from session: " + e);
+        }
     },
     
     _connectSessionSignals: function() {
@@ -625,11 +757,18 @@ Terminal=false`;
             });
             global.log("[" + UUID + "] Restore keybinding set up: " + this.manualRestoreKeybinding);
         }
+        
+        // Temporary test keybinding for exclusion testing (Ctrl+Alt+T)
+        Main.keybindingManager.addHotKey(UUID + "-test-exclusion", "<Control><Alt>t", () => {
+            this._manualTestExclusion();
+        });
+        global.log("[" + UUID + "] Test exclusion keybinding set up: Ctrl+Alt+T");
     },
     
     _cleanupKeybindings: function() {
         Main.keybindingManager.removeHotKey(UUID + "-save");
         Main.keybindingManager.removeHotKey(UUID + "-restore");
+        Main.keybindingManager.removeHotKey(UUID + "-test-exclusion");
         global.log("[" + UUID + "] Keybindings cleaned up");
     },
     
@@ -725,6 +864,7 @@ Terminal=false`;
         
         global.log("[" + UUID + "] === WINDOW COLLECTION DEBUG ===");
         global.log("[" + UUID + "] Total window actors available: " + windows.length);
+        global.log("[" + UUID + "] Current excluded apps setting: '" + this.excludedApps + "'");
         global.log("[" + UUID + "] Excluded apps list: " + excludedAppsArray.join(', '));
         global.log("[" + UUID + "] Collecting session data from " + windows.length + " window actors");
         
@@ -757,15 +897,40 @@ Terminal=false`;
                 continue;
             }
             
-            // Skip excluded applications - be more lenient with exclusions
+            global.log("[" + UUID + "] Checking exclusions for app: '" + app + "'");
+            
+            // Skip excluded applications - comprehensive matching
             let shouldExclude = excludedAppsArray.some(excluded => {
-                return app.toLowerCase().includes(excluded) || 
-                       title.toLowerCase().includes(excluded);
+                if (excluded.trim() === '') return false; // Skip empty entries
+                
+                let excludedLower = excluded.toLowerCase();
+                let appLower = app.toLowerCase();
+                let titleLower = title.toLowerCase();
+                let wmClassLower = (wmClass || '').toLowerCase();
+                let wmClassInstanceLower = (wmClassInstance || '').toLowerCase();
+                
+                // Check multiple identifiers for matches
+                let matches = appLower.includes(excludedLower) || 
+                            titleLower.includes(excludedLower) ||
+                            wmClassLower.includes(excludedLower) ||
+                            wmClassInstanceLower.includes(excludedLower) ||
+                            // Exact matches for better precision
+                            appLower === excludedLower ||
+                            wmClassLower === excludedLower ||
+                            wmClassInstanceLower === excludedLower;
+                
+                if (matches) {
+                    global.log("[" + UUID + "] Match found: '" + excluded + "' matches app data");
+                }
+                
+                return matches;
             });
             
             if (shouldExclude) {
-                global.log("[" + UUID + "] Excluding application: " + app + " (title: " + title + ")");
+                global.log("[" + UUID + "] ✓ EXCLUDING application: " + app + " (wmClass: " + wmClass + ", title: " + title + ")");
                 continue;
+            } else {
+                global.log("[" + UUID + "] ✓ INCLUDING application: " + app);
             }
             
             let frame = window.get_frame_rect();
@@ -1067,6 +1232,18 @@ Terminal=false`;
         
         // Restore the completion flag to previous state
         this._restorationCompleted = wasCompleted;
+    },
+    
+    // Manual test function for dynamic exclusion (for debugging)
+    _manualTestExclusion: function() {
+        global.log("[" + UUID + "] Manual exclusion test triggered");
+        
+        // Test the exclusion change handler with Terminator
+        let previousExcluded = "cinnamon-settings,cinnamon-killer-daemon,nemo-desktop";
+        let currentExcluded = "cinnamon-settings,cinnamon-killer-daemon,nemo-desktop,Terminator";
+        
+        global.log("[" + UUID + "] Testing exclusion change from '" + previousExcluded + "' to '" + currentExcluded + "'");
+        this._handleExclusionChanges(previousExcluded, currentExcluded);
     },
     
     _isApplicationRunning: function(appName) {
