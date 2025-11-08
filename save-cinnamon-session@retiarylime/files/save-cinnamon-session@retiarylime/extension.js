@@ -661,14 +661,56 @@ WantedBy=shutdown.target`;
         }
     },
     
+    _cleanupOldSessionFiles: function() {
+        try {
+            global.log("[" + UUID + "] Starting cleanup of old session tracking files...");
+            
+            let homeDir = GLib.get_home_dir();
+            
+            // Use shell command to find and clean up old session files (keep only 4 newest to make room for new one)
+            let cleanupScript = 'cd "' + homeDir + '" && ' +
+                               'FILES=($(ls -t .cinnamon-session-running-* 2>/dev/null)) && ' +
+                               'TOTAL=${#FILES[@]} && ' +
+                               'if [ $TOTAL -gt 4 ]; then ' +
+                               '  echo "Cleaning up $((TOTAL-4)) old session files" && ' +
+                               '  for ((i=4; i<TOTAL; i++)); do ' +
+                               '    echo "Removing: ${FILES[i]}" && ' +
+                               '    rm -f "${FILES[i]}" ' +
+                               '  done ' +
+                               'fi && ' +
+                               'echo "Session files remaining: $(ls .cinnamon-session-running-* 2>/dev/null | wc -l)"';
+            
+            let [success, output, error] = GLib.spawn_command_line_sync('bash -c \'' + cleanupScript + '\'');
+            
+            if (success) {
+                let result = output.toString().trim();
+                if (result) {
+                    global.log("[" + UUID + "] Session file cleanup result: " + result);
+                }
+            } else {
+                global.log("[" + UUID + "] Session file cleanup failed: " + (error ? error.toString() : "unknown error"));
+            }
+            
+        } catch (e) {
+            global.log("[" + UUID + "] Error during session file cleanup: " + e);
+        }
+    },
+    
     _setupExitHooks: function() {
+        global.log("[" + UUID + "] _setupExitHooks called - setting up exit detection");
+        
         // Set up additional exit detection methods
         try {
+            // Clean up old session tracking files before creating a new one
+            this._cleanupOldSessionFiles();
+            
             // Create a PID file that will be cleaned up on clean shutdown
             this._pidFile = GLib.get_home_dir() + "/.cinnamon-session-running-" + GLib.get_real_time();
             let pidFile = Gio.File.new_for_path(this._pidFile);
             let stream = pidFile.create(Gio.FileCreateFlags.NONE, null);
             stream.close(null);
+            
+            global.log("[" + UUID + "] Created session tracking file: " + this._pidFile);
             
             // Set up a periodic check to save session data
             this._periodicSaveId = Mainloop.timeout_add_seconds(30, () => { // Every 30 seconds
@@ -680,6 +722,9 @@ WantedBy=shutdown.target`;
             
             // Create an autostart entry to help with restoration
             this._createAutostartEntry();
+            
+            // Create manual cleanup script for advanced users
+            this._createManualCleanupScript();
             
             global.log("[" + UUID + "] Exit hooks and periodic save set up");
         } catch (e) {
@@ -743,6 +788,76 @@ Terminal=false`;
             global.log("[" + UUID + "] Login marker autostart entry created for session restoration");
         } catch (e) {
             global.log("[" + UUID + "] Could not create autostart entry: " + e);
+        }
+    },
+    
+    _createManualCleanupScript: function() {
+        // Create a manual cleanup script for session tracking files
+        try {
+            let scriptContent = `#!/bin/bash
+# Cinnamon Session Files Cleanup Script
+# Automatically created by Save Cinnamon Session extension
+# Keeps only the 5 most recent session tracking files
+
+# Change to home directory
+cd "$HOME" || exit 1
+
+# Find all session tracking files and store them in an array, sorted by modification time (newest first)
+mapfile -t FILES < <(ls -t .cinnamon-session-running-* 2>/dev/null)
+
+# Get total count
+TOTAL=\${#FILES[@]}
+
+echo "Found $TOTAL session tracking files"
+
+# If we have more than 5 files, remove the oldest ones
+if [ $TOTAL -gt 5 ]; then
+    REMOVE_COUNT=$((TOTAL - 5))
+    echo "Cleaning up $REMOVE_COUNT old session files (keeping 5 newest)"
+    
+    # Remove files beyond the first 5 (oldest files)
+    for ((i=5; i<TOTAL; i++)); do
+        if [ -f "\${FILES[i]}" ]; then
+            echo "Removing: \${FILES[i]}"
+            rm -f "\${FILES[i]}"
+        fi
+    done
+    
+    echo "Cleanup completed successfully"
+else
+    echo "No cleanup needed - only $TOTAL session files exist (keeping up to 5)"
+fi
+
+# Show current status
+REMAINING=$(ls .cinnamon-session-running-* 2>/dev/null | wc -l)
+echo "Session tracking files remaining: $REMAINING"
+`;
+            
+            // Create the script directory if it doesn't exist
+            let scriptDir = GLib.get_home_dir() + "/.local/bin";
+            let dir = Gio.File.new_for_path(scriptDir);
+            if (!dir.query_exists(null)) {
+                dir.make_directory_with_parents(null);
+                global.log("[" + UUID + "] Created ~/.local/bin directory");
+            }
+            
+            // Write the cleanup script
+            let scriptFile = scriptDir + "/cleanup-session-files.sh";
+            let file = Gio.File.new_for_path(scriptFile);
+            let stream = file.replace(null, false, Gio.FileCreateFlags.NONE, null);
+            let bytes = new GLib.Bytes(scriptContent);
+            stream.write_bytes(bytes, null);
+            stream.close(null);
+            
+            // Make the script executable
+            Util.spawn_command_line_async("chmod +x " + scriptFile);
+            
+            global.log("[" + UUID + "] Manual cleanup script created at: " + scriptFile);
+            global.log("[" + UUID + "] Users can run: ~/.local/bin/cleanup-session-files.sh");
+            global.log("[" + UUID + "] Or add to crontab for automatic execution");
+            
+        } catch (e) {
+            global.log("[" + UUID + "] Could not create manual cleanup script: " + e);
         }
     },
     
