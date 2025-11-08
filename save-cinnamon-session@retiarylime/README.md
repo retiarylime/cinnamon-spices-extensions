@@ -11,9 +11,12 @@ A Cinnamon extension that automatically saves window positions and applications 
 3. **Smart Application Handling**: Launches saved applications and positions their windows in the correct locations and workspaces
 4. **Workspace Preservation**: Maintains workspace assignments and switches to the previously active workspace
 5. **Configurable Delays**: Adjustable restore delay to ensure desktop is fully loaded before restoration begins
-6. **Application Filtering**: Exclude specific applications from being saved/restored (system apps, etc.)
-7. **Manual Controls**: Keyboard shortcuts for manual session save and restore operations
-8. **Maximized/Minimized State**: Preserves window states including maximized and minimized windows
+6. **Dynamic Application Filtering**: Exclude specific applications from being saved/restored with automatic session cleanup when exclusions change
+7. **Custom Application Mappings**: Define custom launch commands for applications that fail to restore automatically
+8. **Manual Controls**: Keyboard shortcuts for manual session save and restore operations
+9. **Maximized/Minimized State**: Preserves window states including maximized and minimized windows
+10. **Automatic File Management**: Auto-creates cleanup scripts and manages session tracking files
+11. **Multi-Detection System**: Uses multiple methods for reliable logout/login detection
 
 ## Requirements
 
@@ -62,6 +65,13 @@ For the latest development version, follow these instructions to install manuall
 
 ### Application Settings
 - **Excluded applications**: Comma-separated list of applications to exclude from session saving (default excludes system applications)
+- **Custom application mappings**: Define custom launch commands for applications that fail to restore automatically. Format: `AppName:command,AnotherApp:another-command`
+
+### Advanced Features
+- **Dynamic Exclusion Management**: When you add new applications to the exclusion list, they are automatically removed from existing saved sessions
+- **Custom Application Support**: Handle edge-case applications that don't restore properly with built-in methods
+- **Automatic Script Management**: Extension automatically creates helper scripts and cleanup utilities
+- **Session File Cleanup**: Automatically manages session tracking files to prevent home directory accumulation
 
 ### Keyboard Shortcuts
 - **Manual save session**: Keyboard shortcut to manually save the current session (default: Super+Shift+S)
@@ -92,6 +102,49 @@ The extension saves session data to `~/.cinnamon-session-save.json` which includ
 - Active workspace information
 - Timestamp of when the session was saved
 
+## Auto-Created Files
+
+The extension automatically creates several helper files:
+- **Session data**: `~/.cinnamon-session-save.json` - Main session storage
+- **Cleanup script**: `~/.local/bin/cleanup-session-files.sh` - Manual cleanup utility
+- **Autostart entry**: `~/.config/autostart/cinnamon-session-restore.desktop` - Login detection
+- **System service**: `~/.config/systemd/user/cinnamon-session-save.service` - Logout detection
+- **Session tracking**: `~/.cinnamon-session-running-*` - Active session monitoring (auto-cleaned)
+
+## Custom Application Mappings
+
+For applications that don't restore properly, you can define custom launch commands:
+
+### Format
+```
+AppName:command,AnotherApp:another-command
+```
+
+### Examples
+```
+# Basic application
+MyCustomApp:mycustomapp
+
+# Flatpak application
+com.example.MyApp:flatpak run com.example.MyApp
+
+# Application with arguments
+MyEditor:myeditor --workspace ~/projects
+
+# Multiple mappings
+CustomIDE:flatpak run com.example.IDE,MyTool:/usr/local/bin/mytool --config ~/.mytool.conf
+```
+
+### Finding Application Names
+To find the correct application name for custom mappings:
+```bash
+# Method 1: Check your session file
+cat ~/.cinnamon-session-save.json | jq '.windows[] | {app: .app, title: .title}'
+
+# Method 2: Use the discovery command (shown in settings tooltip)
+cat ~/.cinnamon-session-save.json | grep '"app"'
+```
+
 ## Limitations
 
 1. **Application Launch**: Some applications may not launch properly via command line or may have different window titles when restored
@@ -109,8 +162,15 @@ The extension saves session data to `~/.cinnamon-session-save.json` which includ
 
 **Applications not launching during restore:**
 - Check that the applications are installed and available in PATH
-- Some applications may need to be launched differently (check excluded applications list)
+- Some applications may need to be launched differently (add custom mappings in settings)
+- Try adding a custom mapping: `AppName:full-command-to-launch`
 - Increase the restore delay if applications need more time to start
+
+**Custom mappings not working:**
+- Verify the application name matches exactly what's in the session file
+- Test the command manually in terminal first
+- Use full paths for better reliability: `/usr/bin/myapp` instead of `myapp`
+- Check extension logs for parsing errors
 
 **Windows not positioning correctly:**
 - Increase the restore delay to give applications more time to fully load
@@ -154,6 +214,33 @@ This extension is released under the GPLv3 License. See the [LICENSE](LICENSE) f
 Contributions are welcome! Please feel free to submit issues, feature requests, or pull requests.
 
 ## Changelog
+
+### Version 1.1.0 - Enhanced Features
+
+#### Added
+- ✅ **NEW** - Dynamic exclusion management with automatic session cleanup
+- ✅ **NEW** - Custom application mappings for problematic applications
+- ✅ **NEW** - Automatic cleanup script creation (`~/.local/bin/cleanup-session-files.sh`)
+- ✅ **NEW** - Enhanced session tracking file management
+- ✅ **NEW** - Multiple logout/login detection methods for reliability
+- ✅ **NEW** - Automatic creation of systemd user service and autostart entries
+- ✅ **NEW** - Session file cleanup to prevent home directory accumulation
+- ✅ **NEW** - Comprehensive application launch fallback system
+- ✅ **NEW** - Enhanced debugging and logging capabilities
+
+#### Improved
+- 🔧 **ENHANCED** - Session saving now removes excluded apps from existing sessions
+- 🔧 **ENHANCED** - Application launching with custom mapping priority system
+- 🔧 **ENHANCED** - More robust session detection and restoration timing
+- 🔧 **ENHANCED** - Better error handling and user feedback
+- 🔧 **ENHANCED** - Settings tooltips with discovery commands and usage examples
+
+#### Technical Features
+- 🎯 **CORE** - Auto-creation of all helper scripts and configuration files
+- 🎯 **CORE** - Custom application mapping parser with error handling
+- 🎯 **CORE** - Dynamic exclusion change detection and session modification
+- 🎯 **CORE** - Session tracking file lifecycle management
+- 🎯 **CORE** - Multiple redundant session detection mechanisms
 
 ### Version 1.0.0 - Initial Release
 
