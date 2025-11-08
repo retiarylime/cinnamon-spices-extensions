@@ -1108,15 +1108,31 @@ echo "Session tracking files remaining: $REMAINING"
                 }
             }
             
-            // For LibreOffice Writer, try to extract and store document information
-            if ((app === "org.libreoffice" || app === "libreoffice-writer" || 
-                 (windowData.wmClass && windowData.wmClass.toLowerCase() === "libreoffice-writer")) && 
-                windowData.title && windowData.title.includes("LibreOffice Writer")) {
+            // For LibreOffice applications, try to extract and store document information
+            if ((app === "org.libreoffice" || 
+                 app.startsWith("libreoffice-") || 
+                 (windowData.wmClass && windowData.wmClass.toLowerCase().startsWith("libreoffice-"))) && 
+                windowData.title && windowData.title.includes("LibreOffice")) {
                 
                 let extractedDocument = this._extractLibreOfficeDocumentPath(windowData.title);
                 if (extractedDocument) {
                     windowData.libreofficeDocument = extractedDocument;
-                    global.log("[" + UUID + "] Captured LibreOffice Writer document: " + extractedDocument);
+                    
+                    // Determine LibreOffice application type from title or wmClass
+                    let appType = "Writer"; // default
+                    if (windowData.title.includes("LibreOffice Calc") || windowData.wmClass === "libreoffice-calc") {
+                        appType = "Calc";
+                    } else if (windowData.title.includes("LibreOffice Impress") || windowData.wmClass === "libreoffice-impress") {
+                        appType = "Impress";
+                    } else if (windowData.title.includes("LibreOffice Draw") || windowData.wmClass === "libreoffice-draw") {
+                        appType = "Draw";
+                    } else if (windowData.title.includes("LibreOffice Base") || windowData.wmClass === "libreoffice-base") {
+                        appType = "Base";
+                    } else if (windowData.title.includes("LibreOffice Math") || windowData.wmClass === "libreoffice-math") {
+                        appType = "Math";
+                    }
+                    
+                    global.log("[" + UUID + "] Captured LibreOffice " + appType + " document: " + extractedDocument);
                     
                     // If it's just a filename, try to find the full path
                     if (!extractedDocument.startsWith("/")) {
@@ -1497,6 +1513,8 @@ echo "Session tracking files remaining: $REMAINING"
             'libreoffice-calc': ['libreoffice --calc', '/usr/bin/libreoffice --calc'],
             'libreoffice-impress': ['libreoffice --impress', '/usr/bin/libreoffice --impress'],
             'libreoffice-draw': ['libreoffice --draw', '/usr/bin/libreoffice --draw'],
+            'libreoffice-base': ['libreoffice --base', '/usr/bin/libreoffice --base'],
+            'libreoffice-math': ['libreoffice --math', '/usr/bin/libreoffice --math'],
             'libreoffice': ['libreoffice', '/usr/bin/libreoffice'],
             'gedit': ['gedit', '/usr/bin/gedit'],
             'nautilus': ['nautilus', '/usr/bin/nautilus']
@@ -1545,11 +1563,135 @@ echo "Session tracking files remaining: $REMAINING"
                     }
                 }
             } else if (wmClass === 'libreoffice-calc') {
-                commands = ['libreoffice --calc', '/usr/bin/libreoffice --calc'];
+                if (windowData.libreofficeDocumentPath) {
+                    commands = ['libreoffice --calc "' + windowData.libreofficeDocumentPath + '"', 
+                               '/usr/bin/libreoffice --calc "' + windowData.libreofficeDocumentPath + '"'];
+                    global.log("[" + UUID + "] LibreOffice Calc - launching with document: " + windowData.libreofficeDocumentPath);
+                } else if (windowData.libreofficeDocument && !windowData.libreofficeDocument.includes("Untitled")) {
+                    let recentDoc = this._getLibreOfficeRecentDocument(windowData.libreofficeDocument);
+                    if (recentDoc) {
+                        commands = ['libreoffice --calc "' + recentDoc + '"', 
+                                   '/usr/bin/libreoffice --calc "' + recentDoc + '"'];
+                        global.log("[" + UUID + "] LibreOffice Calc - found and launching recent document: " + recentDoc);
+                    } else {
+                        commands = ['libreoffice --calc', '/usr/bin/libreoffice --calc'];
+                        global.log("[" + UUID + "] LibreOffice Calc - document not found, launching without document");
+                    }
+                } else {
+                    let recentDoc = this._getLibreOfficeRecentDocument(null);
+                    if (recentDoc && recentDoc.match(/\.(ods|xlsx?|csv)$/i)) {
+                        commands = ['libreoffice --calc "' + recentDoc + '"', 
+                                   '/usr/bin/libreoffice --calc "' + recentDoc + '"'];
+                        global.log("[" + UUID + "] LibreOffice Calc - launching with most recent spreadsheet: " + recentDoc);
+                    } else {
+                        commands = ['libreoffice --calc', '/usr/bin/libreoffice --calc'];
+                        global.log("[" + UUID + "] LibreOffice Calc - no recent spreadsheets found, launching empty");
+                    }
+                }
             } else if (wmClass === 'libreoffice-impress') {
-                commands = ['libreoffice --impress', '/usr/bin/libreoffice --impress'];
+                if (windowData.libreofficeDocumentPath) {
+                    commands = ['libreoffice --impress "' + windowData.libreofficeDocumentPath + '"', 
+                               '/usr/bin/libreoffice --impress "' + windowData.libreofficeDocumentPath + '"'];
+                    global.log("[" + UUID + "] LibreOffice Impress - launching with document: " + windowData.libreofficeDocumentPath);
+                } else if (windowData.libreofficeDocument && !windowData.libreofficeDocument.includes("Untitled")) {
+                    let recentDoc = this._getLibreOfficeRecentDocument(windowData.libreofficeDocument);
+                    if (recentDoc) {
+                        commands = ['libreoffice --impress "' + recentDoc + '"', 
+                                   '/usr/bin/libreoffice --impress "' + recentDoc + '"'];
+                        global.log("[" + UUID + "] LibreOffice Impress - found and launching recent document: " + recentDoc);
+                    } else {
+                        commands = ['libreoffice --impress', '/usr/bin/libreoffice --impress'];
+                        global.log("[" + UUID + "] LibreOffice Impress - document not found, launching without document");
+                    }
+                } else {
+                    let recentDoc = this._getLibreOfficeRecentDocument(null);
+                    if (recentDoc && recentDoc.match(/\.(odp|pptx?)$/i)) {
+                        commands = ['libreoffice --impress "' + recentDoc + '"', 
+                                   '/usr/bin/libreoffice --impress "' + recentDoc + '"'];
+                        global.log("[" + UUID + "] LibreOffice Impress - launching with most recent presentation: " + recentDoc);
+                    } else {
+                        commands = ['libreoffice --impress', '/usr/bin/libreoffice --impress'];
+                        global.log("[" + UUID + "] LibreOffice Impress - no recent presentations found, launching empty");
+                    }
+                }
             } else if (wmClass === 'libreoffice-draw') {
-                commands = ['libreoffice --draw', '/usr/bin/libreoffice --draw'];
+                if (windowData.libreofficeDocumentPath) {
+                    commands = ['libreoffice --draw "' + windowData.libreofficeDocumentPath + '"', 
+                               '/usr/bin/libreoffice --draw "' + windowData.libreofficeDocumentPath + '"'];
+                    global.log("[" + UUID + "] LibreOffice Draw - launching with document: " + windowData.libreofficeDocumentPath);
+                } else if (windowData.libreofficeDocument && !windowData.libreofficeDocument.includes("Untitled")) {
+                    let recentDoc = this._getLibreOfficeRecentDocument(windowData.libreofficeDocument);
+                    if (recentDoc) {
+                        commands = ['libreoffice --draw "' + recentDoc + '"', 
+                                   '/usr/bin/libreoffice --draw "' + recentDoc + '"'];
+                        global.log("[" + UUID + "] LibreOffice Draw - found and launching recent document: " + recentDoc);
+                    } else {
+                        commands = ['libreoffice --draw', '/usr/bin/libreoffice --draw'];
+                        global.log("[" + UUID + "] LibreOffice Draw - document not found, launching without document");
+                    }
+                } else {
+                    let recentDoc = this._getLibreOfficeRecentDocument(null);
+                    if (recentDoc && recentDoc.match(/\.(odg|svg)$/i)) {
+                        commands = ['libreoffice --draw "' + recentDoc + '"', 
+                                   '/usr/bin/libreoffice --draw "' + recentDoc + '"'];
+                        global.log("[" + UUID + "] LibreOffice Draw - launching with most recent drawing: " + recentDoc);
+                    } else {
+                        commands = ['libreoffice --draw', '/usr/bin/libreoffice --draw'];
+                        global.log("[" + UUID + "] LibreOffice Draw - no recent drawings found, launching empty");
+                    }
+                }
+            } else if (wmClass === 'libreoffice-base') {
+                if (windowData.libreofficeDocumentPath) {
+                    commands = ['libreoffice --base "' + windowData.libreofficeDocumentPath + '"', 
+                               '/usr/bin/libreoffice --base "' + windowData.libreofficeDocumentPath + '"'];
+                    global.log("[" + UUID + "] LibreOffice Base - launching with database: " + windowData.libreofficeDocumentPath);
+                } else if (windowData.libreofficeDocument && !windowData.libreofficeDocument.includes("Untitled")) {
+                    let recentDoc = this._getLibreOfficeRecentDocument(windowData.libreofficeDocument);
+                    if (recentDoc) {
+                        commands = ['libreoffice --base "' + recentDoc + '"', 
+                                   '/usr/bin/libreoffice --base "' + recentDoc + '"'];
+                        global.log("[" + UUID + "] LibreOffice Base - found and launching recent database: " + recentDoc);
+                    } else {
+                        commands = ['libreoffice --base', '/usr/bin/libreoffice --base'];
+                        global.log("[" + UUID + "] LibreOffice Base - database not found, launching without document");
+                    }
+                } else {
+                    let recentDoc = this._getLibreOfficeRecentDocument(null);
+                    if (recentDoc && recentDoc.match(/\.odb$/i)) {
+                        commands = ['libreoffice --base "' + recentDoc + '"', 
+                                   '/usr/bin/libreoffice --base "' + recentDoc + '"'];
+                        global.log("[" + UUID + "] LibreOffice Base - launching with most recent database: " + recentDoc);
+                    } else {
+                        commands = ['libreoffice --base', '/usr/bin/libreoffice --base'];
+                        global.log("[" + UUID + "] LibreOffice Base - no recent databases found, launching empty");
+                    }
+                }
+            } else if (wmClass === 'libreoffice-math') {
+                if (windowData.libreofficeDocumentPath) {
+                    commands = ['libreoffice --math "' + windowData.libreofficeDocumentPath + '"', 
+                               '/usr/bin/libreoffice --math "' + windowData.libreofficeDocumentPath + '"'];
+                    global.log("[" + UUID + "] LibreOffice Math - launching with formula: " + windowData.libreofficeDocumentPath);
+                } else if (windowData.libreofficeDocument && !windowData.libreofficeDocument.includes("Untitled")) {
+                    let recentDoc = this._getLibreOfficeRecentDocument(windowData.libreofficeDocument);
+                    if (recentDoc) {
+                        commands = ['libreoffice --math "' + recentDoc + '"', 
+                                   '/usr/bin/libreoffice --math "' + recentDoc + '"'];
+                        global.log("[" + UUID + "] LibreOffice Math - found and launching recent formula: " + recentDoc);
+                    } else {
+                        commands = ['libreoffice --math', '/usr/bin/libreoffice --math'];
+                        global.log("[" + UUID + "] LibreOffice Math - formula not found, launching without document");
+                    }
+                } else {
+                    let recentDoc = this._getLibreOfficeRecentDocument(null);
+                    if (recentDoc && recentDoc.match(/\.odf$/i)) {
+                        commands = ['libreoffice --math "' + recentDoc + '"', 
+                                   '/usr/bin/libreoffice --math "' + recentDoc + '"'];
+                        global.log("[" + UUID + "] LibreOffice Math - launching with most recent formula: " + recentDoc);
+                    } else {
+                        commands = ['libreoffice --math', '/usr/bin/libreoffice --math'];
+                        global.log("[" + UUID + "] LibreOffice Math - no recent formulas found, launching empty");
+                    }
+                }
             } else {
                 // Fall back to generic libreoffice
                 commands = ['libreoffice', '/usr/bin/libreoffice'];
@@ -1718,11 +1860,34 @@ echo "Session tracking files remaining: $REMAINING"
             } catch (e) {
                 global.log("[" + UUID + "] Failed to launch Nemo: " + e);
             }
-        } else if (app === "org.libreoffice" || app === "libreoffice-writer" || 
-                   (windowData.wmClass && windowData.wmClass.toLowerCase() === "libreoffice-writer")) {
-            // For LibreOffice Writer, try to open with the specific document
+        } else if (app === "org.libreoffice" || 
+                   app.startsWith("libreoffice-") || 
+                   (windowData.wmClass && windowData.wmClass.toLowerCase().startsWith("libreoffice-"))) {
+            // For LibreOffice applications, try to open with the specific document
             try {
                 let documentPath = null;
+                let appType = "writer"; // default
+                let appFlag = "--writer"; // default
+                
+                // Determine the LibreOffice application type
+                if (windowData.wmClass === "libreoffice-calc" || app === "libreoffice-calc" || windowData.title.includes("LibreOffice Calc")) {
+                    appType = "calc";
+                    appFlag = "--calc";
+                } else if (windowData.wmClass === "libreoffice-impress" || app === "libreoffice-impress" || windowData.title.includes("LibreOffice Impress")) {
+                    appType = "impress";
+                    appFlag = "--impress";
+                } else if (windowData.wmClass === "libreoffice-draw" || app === "libreoffice-draw" || windowData.title.includes("LibreOffice Draw")) {
+                    appType = "draw";
+                    appFlag = "--draw";
+                } else if (windowData.wmClass === "libreoffice-base" || app === "libreoffice-base" || windowData.title.includes("LibreOffice Base")) {
+                    appType = "base";
+                    appFlag = "--base";
+                } else if (windowData.wmClass === "libreoffice-math" || app === "libreoffice-math" || windowData.title.includes("LibreOffice Math")) {
+                    appType = "math";
+                    appFlag = "--math";
+                }
+                
+                global.log("[" + UUID + "] Detected LibreOffice " + appType.charAt(0).toUpperCase() + appType.slice(1));
                 
                 // Priority 1: Use full document path if available
                 if (windowData.libreofficeDocumentPath) {
@@ -1735,26 +1900,45 @@ echo "Session tracking files remaining: $REMAINING"
                         global.log("[" + UUID + "] Found document in recent files: " + documentPath);
                     }
                 } else {
-                    // Priority 3: Use most recent document
-                    documentPath = this._getLibreOfficeRecentDocument(null);
-                    if (documentPath) {
-                        global.log("[" + UUID + "] Using most recent LibreOffice document: " + documentPath);
+                    // Priority 3: Use most recent document of the appropriate type
+                    let recentDoc = this._getLibreOfficeRecentDocument(null);
+                    if (recentDoc) {
+                        // Check if the document is appropriate for this app type
+                        let isAppropriate = false;
+                        if (appType === "writer" && recentDoc.match(/\.(odt|docx?|rtf|txt)$/i)) {
+                            isAppropriate = true;
+                        } else if (appType === "calc" && recentDoc.match(/\.(ods|xlsx?|csv)$/i)) {
+                            isAppropriate = true;
+                        } else if (appType === "impress" && recentDoc.match(/\.(odp|pptx?)$/i)) {
+                            isAppropriate = true;
+                        } else if (appType === "draw" && recentDoc.match(/\.(odg|svg)$/i)) {
+                            isAppropriate = true;
+                        } else if (appType === "base" && recentDoc.match(/\.odb$/i)) {
+                            isAppropriate = true;
+                        } else if (appType === "math" && recentDoc.match(/\.odf$/i)) {
+                            isAppropriate = true;
+                        }
+                        
+                        if (isAppropriate) {
+                            documentPath = recentDoc;
+                            global.log("[" + UUID + "] Using most recent " + appType + " document: " + documentPath);
+                        }
                     }
                 }
                 
                 if (documentPath && GLib.file_test(documentPath, GLib.FileTest.EXISTS)) {
                     // Launch with specific document
-                    GLib.spawn_command_line_async('libreoffice --writer "' + documentPath + '"');
+                    GLib.spawn_command_line_async('libreoffice ' + appFlag + ' "' + documentPath + '"');
                     launched = true;
-                    global.log("[" + UUID + "] Launched LibreOffice Writer with document: " + documentPath);
+                    global.log("[" + UUID + "] Launched LibreOffice " + appType.charAt(0).toUpperCase() + appType.slice(1) + " with document: " + documentPath);
                 } else {
                     // Launch without specific document
-                    GLib.spawn_command_line_async('libreoffice --writer');
+                    GLib.spawn_command_line_async('libreoffice ' + appFlag);
                     launched = true;
-                    global.log("[" + UUID + "] Launched LibreOffice Writer (no document or document not found)");
+                    global.log("[" + UUID + "] Launched LibreOffice " + appType.charAt(0).toUpperCase() + appType.slice(1) + " (no document or document not found)");
                 }
             } catch (e) {
-                global.log("[" + UUID + "] Failed to launch LibreOffice Writer: " + e);
+                global.log("[" + UUID + "] Failed to launch LibreOffice: " + e);
             }
         } else if (app === "Code") {
             // For VS Code, try to open with the most recent workspace/folder
@@ -2147,22 +2331,25 @@ echo "Session tracking files remaining: $REMAINING"
     },
     
     _extractLibreOfficeDocumentPath: function(title) {
-        // Extract document file path from LibreOffice Writer window title
+        // Extract document file path from LibreOffice window title
         // Common patterns:
         // "Document1 - LibreOffice Writer"
         // "filename.odt - LibreOffice Writer"
         // "filename.docx — LibreOffice Writer" (note the em dash)
+        // "filename.xlsx - LibreOffice Calc"
+        // "filename.pptx - LibreOffice Impress"
+        // "filename.odg - LibreOffice Draw"
         // "/path/to/file.odt - LibreOffice Writer"
         // "Untitled 1 - LibreOffice Writer"
         
-        if (!title || !title.includes("LibreOffice Writer")) {
+        if (!title || !title.includes("LibreOffice")) {
             return null;
         }
         
         global.log("[" + UUID + "] Extracting LibreOffice document from title: " + title);
         
-        // Remove "— LibreOffice Writer" or "- LibreOffice Writer" from the end
-        let cleanTitle = title.replace(/\s*[—-]\s*LibreOffice Writer$/, "").trim();
+        // Remove "— LibreOffice [App]" or "- LibreOffice [App]" from the end
+        let cleanTitle = title.replace(/\s*[—-]\s*LibreOffice\s+(Writer|Calc|Impress|Draw|Base|Math)$/, "").trim();
         
         // Skip only generic untitled documents (but allow saved files with "Untitled" in the name)
         if ((cleanTitle.toLowerCase().includes("untitled") && !cleanTitle.includes(".")) || 
@@ -2218,8 +2405,14 @@ echo "Session tracking files remaining: $REMAINING"
             while ((match = nodePattern.exec(configData)) !== null) {
                 let filePath = "/" + decodeURIComponent(match[1]); // Add leading slash back
                 
-                // Filter for Writer documents (include .txt for our test)
-                if (filePath.match(/\.(odt|docx?|rtf|txt)$/i)) {
+                // Filter for all LibreOffice document formats
+                // Writer: .odt, .docx, .doc, .rtf, .txt
+                // Calc: .ods, .xlsx, .xls, .csv
+                // Impress: .odp, .pptx, .ppt
+                // Draw: .odg, .svg
+                // Base: .odb
+                // Math: .odf
+                if (filePath.match(/\.(odt|docx?|rtf|txt|ods|xlsx?|csv|odp|pptx?|odg|svg|odb|odf)$/i)) {
                     recentFiles.push(filePath);
                     global.log("[" + UUID + "] Found recent LibreOffice document: " + filePath);
                 }
