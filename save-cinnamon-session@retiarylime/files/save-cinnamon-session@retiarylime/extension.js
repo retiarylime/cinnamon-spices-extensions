@@ -1108,6 +1108,29 @@ echo "Session tracking files remaining: $REMAINING"
                 }
             }
             
+            // For LibreOffice Writer, try to extract and store document information
+            if ((app === "org.libreoffice" || app === "libreoffice-writer" || 
+                 (windowData.wmClass && windowData.wmClass.toLowerCase() === "libreoffice-writer")) && 
+                windowData.title && windowData.title.includes("LibreOffice Writer")) {
+                
+                let extractedDocument = this._extractLibreOfficeDocumentPath(windowData.title);
+                if (extractedDocument) {
+                    windowData.libreofficeDocument = extractedDocument;
+                    global.log("[" + UUID + "] Captured LibreOffice Writer document: " + extractedDocument);
+                    
+                    // If it's just a filename, try to find the full path
+                    if (!extractedDocument.startsWith("/")) {
+                        let fullPath = this._getLibreOfficeRecentDocument(extractedDocument);
+                        if (fullPath) {
+                            windowData.libreofficeDocumentPath = fullPath;
+                            global.log("[" + UUID + "] Found full path for document: " + fullPath);
+                        }
+                    } else {
+                        windowData.libreofficeDocumentPath = extractedDocument;
+                    }
+                }
+            }
+            
             // Create a unique key for duplicate detection - use PID and window handle for better uniqueness
             let windowHandle = window.get_stable_sequence ? window.get_stable_sequence() : window.get_id();
             let windowKey = app + "|" + windowData.title + "|" + pid + "|" + windowHandle;
@@ -1493,7 +1516,34 @@ echo "Session tracking files remaining: $REMAINING"
         if (app === 'org.libreoffice' && windowData && windowData.wmClass) {
             let wmClass = windowData.wmClass.toLowerCase();
             if (wmClass === 'libreoffice-writer') {
-                commands = ['libreoffice --writer', '/usr/bin/libreoffice --writer'];
+                // Check if we have a specific document to restore
+                if (windowData.libreofficeDocumentPath) {
+                    commands = ['libreoffice --writer "' + windowData.libreofficeDocumentPath + '"', 
+                               '/usr/bin/libreoffice --writer "' + windowData.libreofficeDocumentPath + '"'];
+                    global.log("[" + UUID + "] LibreOffice Writer - launching with document: " + windowData.libreofficeDocumentPath);
+                } else if (windowData.libreofficeDocument && !windowData.libreofficeDocument.includes("Untitled")) {
+                    // Try to find the document in recent files
+                    let recentDoc = this._getLibreOfficeRecentDocument(windowData.libreofficeDocument);
+                    if (recentDoc) {
+                        commands = ['libreoffice --writer "' + recentDoc + '"', 
+                                   '/usr/bin/libreoffice --writer "' + recentDoc + '"'];
+                        global.log("[" + UUID + "] LibreOffice Writer - found and launching recent document: " + recentDoc);
+                    } else {
+                        commands = ['libreoffice --writer', '/usr/bin/libreoffice --writer'];
+                        global.log("[" + UUID + "] LibreOffice Writer - document not found, launching without document");
+                    }
+                } else {
+                    // No specific document, check for most recent document
+                    let recentDoc = this._getLibreOfficeRecentDocument(null);
+                    if (recentDoc) {
+                        commands = ['libreoffice --writer "' + recentDoc + '"', 
+                                   '/usr/bin/libreoffice --writer "' + recentDoc + '"'];
+                        global.log("[" + UUID + "] LibreOffice Writer - launching with most recent document: " + recentDoc);
+                    } else {
+                        commands = ['libreoffice --writer', '/usr/bin/libreoffice --writer'];
+                        global.log("[" + UUID + "] LibreOffice Writer - no recent documents found, launching empty");
+                    }
+                }
             } else if (wmClass === 'libreoffice-calc') {
                 commands = ['libreoffice --calc', '/usr/bin/libreoffice --calc'];
             } else if (wmClass === 'libreoffice-impress') {
@@ -1667,6 +1717,44 @@ echo "Session tracking files remaining: $REMAINING"
                 }
             } catch (e) {
                 global.log("[" + UUID + "] Failed to launch Nemo: " + e);
+            }
+        } else if (app === "org.libreoffice" || app === "libreoffice-writer" || 
+                   (windowData.wmClass && windowData.wmClass.toLowerCase() === "libreoffice-writer")) {
+            // For LibreOffice Writer, try to open with the specific document
+            try {
+                let documentPath = null;
+                
+                // Priority 1: Use full document path if available
+                if (windowData.libreofficeDocumentPath) {
+                    documentPath = windowData.libreofficeDocumentPath;
+                    global.log("[" + UUID + "] Using saved document path: " + documentPath);
+                } else if (windowData.libreofficeDocument && !windowData.libreofficeDocument.includes("Untitled")) {
+                    // Priority 2: Try to find the document in recent files
+                    documentPath = this._getLibreOfficeRecentDocument(windowData.libreofficeDocument);
+                    if (documentPath) {
+                        global.log("[" + UUID + "] Found document in recent files: " + documentPath);
+                    }
+                } else {
+                    // Priority 3: Use most recent document
+                    documentPath = this._getLibreOfficeRecentDocument(null);
+                    if (documentPath) {
+                        global.log("[" + UUID + "] Using most recent LibreOffice document: " + documentPath);
+                    }
+                }
+                
+                if (documentPath && GLib.file_test(documentPath, GLib.FileTest.EXISTS)) {
+                    // Launch with specific document
+                    GLib.spawn_command_line_async('libreoffice --writer "' + documentPath + '"');
+                    launched = true;
+                    global.log("[" + UUID + "] Launched LibreOffice Writer with document: " + documentPath);
+                } else {
+                    // Launch without specific document
+                    GLib.spawn_command_line_async('libreoffice --writer');
+                    launched = true;
+                    global.log("[" + UUID + "] Launched LibreOffice Writer (no document or document not found)");
+                }
+            } catch (e) {
+                global.log("[" + UUID + "] Failed to launch LibreOffice Writer: " + e);
             }
         } else if (app === "Code") {
             // For VS Code, try to open with the most recent workspace/folder
@@ -2056,6 +2144,134 @@ echo "Session tracking files remaining: $REMAINING"
             }
         }
         return null;
+    },
+    
+    _extractLibreOfficeDocumentPath: function(title) {
+        // Extract document file path from LibreOffice Writer window title
+        // Common patterns:
+        // "Document1 - LibreOffice Writer"
+        // "filename.odt - LibreOffice Writer"
+        // "filename.docx — LibreOffice Writer" (note the em dash)
+        // "/path/to/file.odt - LibreOffice Writer"
+        // "Untitled 1 - LibreOffice Writer"
+        
+        if (!title || !title.includes("LibreOffice Writer")) {
+            return null;
+        }
+        
+        global.log("[" + UUID + "] Extracting LibreOffice document from title: " + title);
+        
+        // Remove "— LibreOffice Writer" or "- LibreOffice Writer" from the end
+        let cleanTitle = title.replace(/\s*[—-]\s*LibreOffice Writer$/, "").trim();
+        
+        // Skip only generic untitled documents (but allow saved files with "Untitled" in the name)
+        if ((cleanTitle.toLowerCase().includes("untitled") && !cleanTitle.includes(".")) || 
+            cleanTitle.toLowerCase().includes("document") ||
+            cleanTitle.toLowerCase().includes("unsaved") ||
+            cleanTitle.toLowerCase().match(/^untitled\s*\d*$/)) {
+            global.log("[" + UUID + "] Skipping untitled/new document: " + cleanTitle);
+            return null;
+        }
+        
+        // If it's a full path, return it
+        if (cleanTitle.startsWith("/")) {
+            global.log("[" + UUID + "] Found full path: " + cleanTitle);
+            return cleanTitle;
+        }
+        
+        // If it's just a filename, we need to find it in recent files
+        global.log("[" + UUID + "] Found filename: " + cleanTitle);
+        return cleanTitle;
+    },
+    
+    _getLibreOfficeRecentDocument: function(targetFileName) {
+        // Get the most recently edited LibreOffice document
+        try {
+            let homeDir = GLib.get_home_dir();
+            
+            // LibreOffice stores recent files in registrymodifications.xcu
+            let configPath = homeDir + "/.config/libreoffice/4/user/registrymodifications.xcu";
+            
+            if (!GLib.file_test(configPath, GLib.FileTest.EXISTS)) {
+                global.log("[" + UUID + "] LibreOffice config not found at: " + configPath);
+                return null;
+            }
+            
+            let file = Gio.File.new_for_path(configPath);
+            let [success, contents] = file.load_contents(null);
+            
+            if (!success) {
+                global.log("[" + UUID + "] Failed to read LibreOffice config");
+                return null;
+            }
+            
+            let configData = contents.toString();
+            
+            // Look for recent files in PickList entries
+            let recentFiles = [];
+            
+            // LibreOffice stores recent files in PickList ItemList 
+            // Look for node entries with file:// URLs in the name attribute
+            let nodePattern = /<node oor:name="file:\/\/\/([^"]+)"/g;
+            let match;
+            
+            while ((match = nodePattern.exec(configData)) !== null) {
+                let filePath = "/" + decodeURIComponent(match[1]); // Add leading slash back
+                
+                // Filter for Writer documents (include .txt for our test)
+                if (filePath.match(/\.(odt|docx?|rtf|txt)$/i)) {
+                    recentFiles.push(filePath);
+                    global.log("[" + UUID + "] Found recent LibreOffice document: " + filePath);
+                }
+            }
+            
+            // If we have a target filename, try to find it
+            if (targetFileName) {
+                for (let filePath of recentFiles) {
+                    // Try multiple matching strategies
+                    let fileName = filePath.split('/').pop(); // Get just the filename
+                    
+                    // Strategy 1: Exact filename match
+                    if (fileName === targetFileName) {
+                        global.log("[" + UUID + "] Found exact filename match: " + filePath);
+                        return filePath;
+                    }
+                    
+                    // Strategy 2: Case-insensitive filename match
+                    if (fileName.toLowerCase() === targetFileName.toLowerCase()) {
+                        global.log("[" + UUID + "] Found case-insensitive filename match: " + filePath);
+                        return filePath;
+                    }
+                    
+                    // Strategy 3: Filename contains the target (for partial matches)
+                    if (fileName.includes(targetFileName) || targetFileName.includes(fileName)) {
+                        global.log("[" + UUID + "] Found partial filename match: " + filePath);
+                        return filePath;
+                    }
+                    
+                    // Strategy 4: Full path contains the target
+                    if (filePath.includes(targetFileName)) {
+                        global.log("[" + UUID + "] Found path containing target: " + filePath);
+                        return filePath;
+                    }
+                }
+                
+                global.log("[" + UUID + "] No matching document found for: " + targetFileName);
+            }
+            
+            // Return the most recent document (first in list)
+            if (recentFiles.length > 0) {
+                global.log("[" + UUID + "] Using most recent LibreOffice document: " + recentFiles[0]);
+                return recentFiles[0];
+            }
+            
+            global.log("[" + UUID + "] No recent LibreOffice documents found");
+            return null;
+            
+        } catch (e) {
+            global.log("[" + UUID + "] Error reading LibreOffice recent files: " + e);
+            return null;
+        }
     },
     
     _positionWindows: function(sessionData) {
