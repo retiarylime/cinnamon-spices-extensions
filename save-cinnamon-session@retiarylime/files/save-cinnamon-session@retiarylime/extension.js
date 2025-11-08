@@ -1227,6 +1227,29 @@ echo "Session tracking files remaining: $REMAINING"
                 }
             }
             
+            // For Xreader (PDF viewer), try to extract and store document information
+            if ((app === "Xreader" || app === "xreader" || 
+                 (windowData.wmClass && windowData.wmClass.toLowerCase() === "xreader")) && 
+                windowData.title) {
+                
+                let extractedDocument = this._extractXreaderDocumentPath(windowData.title);
+                if (extractedDocument) {
+                    windowData.xreaderDocument = extractedDocument;
+                    global.log("[" + UUID + "] Captured Xreader document: " + extractedDocument);
+                    
+                    // If it's just a filename, try to find the full path
+                    if (!extractedDocument.startsWith("/")) {
+                        let fullPath = this._getXreaderRecentDocument(extractedDocument);
+                        if (fullPath) {
+                            windowData.xreaderDocumentPath = fullPath;
+                            global.log("[" + UUID + "] Found full path for PDF: " + fullPath);
+                        }
+                    } else {
+                        windowData.xreaderDocumentPath = extractedDocument;
+                    }
+                }
+            }
+            
             // Create a unique key for duplicate detection - use PID and window handle for better uniqueness
             let windowHandle = window.get_stable_sequence ? window.get_stable_sequence() : window.get_id();
             let windowKey = app + "|" + windowData.title + "|" + pid + "|" + windowHandle;
@@ -1777,6 +1800,41 @@ echo "Session tracking files remaining: $REMAINING"
                 commands = ['libreoffice', '/usr/bin/libreoffice'];
             }
             global.log("[" + UUID + "] LibreOffice detected - using specific command for " + wmClass);
+        
+        // Special handling for Xreader (PDF viewer)
+        } else if (app === 'Xreader' || app === 'xreader' || 
+                   (windowData && windowData.wmClass && windowData.wmClass.toLowerCase() === 'xreader')) {
+            
+            // Check if we have a specific document to restore
+            if (windowData && windowData.xreaderDocumentPath) {
+                commands = ['xreader "' + windowData.xreaderDocumentPath + '"', 
+                           '/usr/bin/xreader "' + windowData.xreaderDocumentPath + '"'];
+                global.log("[" + UUID + "] Xreader - launching with document: " + windowData.xreaderDocumentPath);
+            } else if (windowData && windowData.xreaderDocument) {
+                // Try to find the document in recent files
+                let recentDoc = this._getXreaderRecentDocument(windowData.xreaderDocument);
+                if (recentDoc) {
+                    commands = ['xreader "' + recentDoc + '"', 
+                               '/usr/bin/xreader "' + recentDoc + '"'];
+                    global.log("[" + UUID + "] Xreader - found and launching recent document: " + recentDoc);
+                } else {
+                    commands = ['xreader', '/usr/bin/xreader'];
+                    global.log("[" + UUID + "] Xreader - document not found, launching without document");
+                }
+            } else {
+                // No specific document, check for most recent PDF document
+                let recentDoc = this._getXreaderRecentDocument(null);
+                if (recentDoc) {
+                    commands = ['xreader "' + recentDoc + '"', 
+                               '/usr/bin/xreader "' + recentDoc + '"'];
+                    global.log("[" + UUID + "] Xreader - launching with most recent document: " + recentDoc);
+                } else {
+                    commands = ['xreader', '/usr/bin/xreader'];
+                    global.log("[" + UUID + "] Xreader - no recent documents found, launching empty");
+                }
+            }
+            global.log("[" + UUID + "] Xreader detected - using document-aware command");
+        
         } else {
             // Get possible commands for this app
             commands = appCommands[app] || [app, app.toLowerCase()];
@@ -2019,6 +2077,47 @@ echo "Session tracking files remaining: $REMAINING"
                 }
             } catch (e) {
                 global.log("[" + UUID + "] Failed to launch LibreOffice: " + e);
+            }
+        } else if (app === "Xreader" || app === "xreader" || 
+                   (windowData.wmClass && windowData.wmClass.toLowerCase() === "xreader")) {
+            // For Xreader (PDF viewer), try to open with the specific document
+            try {
+                let documentPath = null;
+                
+                global.log("[" + UUID + "] Detected Xreader PDF viewer");
+                
+                // Priority 1: Use full document path if available
+                if (windowData.xreaderDocumentPath) {
+                    documentPath = windowData.xreaderDocumentPath;
+                    global.log("[" + UUID + "] Using saved document path: " + documentPath);
+                } else if (windowData.xreaderDocument) {
+                    // Priority 2: Try to find the document in recent files
+                    documentPath = this._getXreaderRecentDocument(windowData.xreaderDocument);
+                    if (documentPath) {
+                        global.log("[" + UUID + "] Found document in recent files: " + documentPath);
+                    }
+                } else {
+                    // Priority 3: Use most recent PDF document
+                    let recentDoc = this._getXreaderRecentDocument(null);
+                    if (recentDoc) {
+                        documentPath = recentDoc;
+                        global.log("[" + UUID + "] Using most recent document: " + documentPath);
+                    }
+                }
+                
+                if (documentPath && GLib.file_test(documentPath, GLib.FileTest.EXISTS)) {
+                    // Launch with specific document
+                    GLib.spawn_command_line_async('xreader "' + documentPath + '"');
+                    launched = true;
+                    global.log("[" + UUID + "] Launched Xreader with document: " + documentPath);
+                } else {
+                    // Launch without specific document
+                    GLib.spawn_command_line_async('xreader');
+                    launched = true;
+                    global.log("[" + UUID + "] Launched Xreader (no document or document not found)");
+                }
+            } catch (e) {
+                global.log("[" + UUID + "] Failed to launch Xreader: " + e);
             }
         } else if (app === "Code") {
             // For VS Code, try to open with the most recent workspace/folder
@@ -2451,6 +2550,55 @@ echo "Session tracking files remaining: $REMAINING"
         return cleanTitle;
     },
     
+    _extractXreaderDocumentPath: function(title) {
+        // Extract document file path from Xreader window title
+        // Common patterns:
+        // "MyFinancial.pdf"
+        // "document.pdf - Xreader"
+        // "/path/to/document.pdf - Xreader"
+        // "Some Document.pdf (Page 5 of 20) - Xreader"
+        
+        if (!title) {
+            return null;
+        }
+        
+        global.log("[" + UUID + "] Extracting Xreader document from title: " + title);
+        
+        // Remove "- Xreader" from the end if present
+        let cleanTitle = title.replace(/\s*-\s*Xreader\s*$/, "").trim();
+        
+        // Remove page information like "(Page X of Y)" if present
+        cleanTitle = cleanTitle.replace(/\s*\(Page\s+\d+\s+of\s+\d+\)\s*$/, "").trim();
+        
+        // Skip if it's just "Xreader" or empty
+        if (cleanTitle.toLowerCase() === "xreader" || cleanTitle === "") {
+            global.log("[" + UUID + "] Skipping empty or generic Xreader title: " + cleanTitle);
+            return null;
+        }
+        
+        // Check if it looks like a PDF file or other supported document format
+        if (!cleanTitle.toLowerCase().match(/\.(pdf|djvu|djv|ps|eps|cbz|cbr|cb7|cbt)$/)) {
+            // Try to add .pdf extension if it looks like a document name without extension
+            if (!cleanTitle.includes("/") && !cleanTitle.includes(".")) {
+                cleanTitle += ".pdf";
+                global.log("[" + UUID + "] Added .pdf extension to: " + cleanTitle);
+            } else {
+                global.log("[" + UUID + "] Title doesn't look like a document file: " + cleanTitle);
+                return null;
+            }
+        }
+        
+        // If it's a full path, return it
+        if (cleanTitle.startsWith("/")) {
+            global.log("[" + UUID + "] Found full path: " + cleanTitle);
+            return cleanTitle;
+        }
+        
+        // If it's just a filename, we need to find it in recent files
+        global.log("[" + UUID + "] Found filename: " + cleanTitle);
+        return cleanTitle;
+    },
+    
     _getLibreOfficeRecentDocument: function(targetFileName) {
         // Get the most recently edited LibreOffice document
         try {
@@ -2543,6 +2691,138 @@ echo "Session tracking files remaining: $REMAINING"
             
         } catch (e) {
             global.log("[" + UUID + "] Error reading LibreOffice recent files: " + e);
+            return null;
+        }
+    },
+    
+    _getXreaderRecentDocument: function(targetFileName) {
+        // Get the most recently opened PDF/document from Xreader's recent files
+        try {
+            let homeDir = GLib.get_home_dir();
+            
+            // Xreader stores recent files in ~/.local/share/recently-used.xbel
+            // Also check GTK recent files which many applications use
+            let recentPaths = [
+                homeDir + "/.local/share/recently-used.xbel",
+                homeDir + "/.recently-used.xbel",
+                homeDir + "/.local/share/RecentDocuments/index.xml"
+            ];
+            
+            let recentFiles = [];
+            
+            for (let recentPath of recentPaths) {
+                if (!GLib.file_test(recentPath, GLib.FileTest.EXISTS)) {
+                    continue;
+                }
+                
+                let file = Gio.File.new_for_path(recentPath);
+                let [success, contents] = file.load_contents(null);
+                
+                if (!success) {
+                    continue;
+                }
+                
+                let recentData = contents.toString();
+                global.log("[" + UUID + "] Checking recent files in: " + recentPath);
+                
+                // Parse XBEL format (XML) for recent files
+                // Look for bookmark entries with file:// hrefs
+                let bookmarkPattern = /<bookmark\s+href="file:\/\/\/([^"]+)"/g;
+                let match;
+                
+                while ((match = bookmarkPattern.exec(recentData)) !== null) {
+                    let filePath = "/" + decodeURIComponent(match[1]); // Add leading slash back
+                    
+                    // Filter for PDF and other document viewer formats
+                    if (filePath.match(/\.(pdf|djvu|djv|ps|eps|cbz|cbr|cb7|cbt)$/i)) {
+                        // Check if file still exists
+                        if (GLib.file_test(filePath, GLib.FileTest.EXISTS)) {
+                            recentFiles.push(filePath);
+                            global.log("[" + UUID + "] Found recent document: " + filePath);
+                        }
+                    }
+                }
+            }
+            
+            // Also try to find PDF files in common directories if no recent files found
+            if (recentFiles.length === 0) {
+                let commonPdfDirs = [
+                    homeDir + "/Documents",
+                    homeDir + "/Downloads", 
+                    homeDir + "/Desktop"
+                ];
+                
+                for (let pdfDir of commonPdfDirs) {
+                    try {
+                        if (GLib.file_test(pdfDir, GLib.FileTest.EXISTS)) {
+                            let [success, output] = GLib.spawn_command_line_sync('find "' + pdfDir + '" -name "*.pdf" -type f -printf "%T@ %p\\n" 2>/dev/null | sort -nr | head -10');
+                            if (success) {
+                                let lines = output.toString().trim().split('\n');
+                                for (let line of lines) {
+                                    if (line.includes(' ')) {
+                                        let filePath = line.substring(line.indexOf(' ') + 1);
+                                        if (filePath && GLib.file_test(filePath, GLib.FileTest.EXISTS)) {
+                                            recentFiles.push(filePath);
+                                            global.log("[" + UUID + "] Found PDF in " + pdfDir + ": " + filePath);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        // Ignore errors scanning directories
+                    }
+                }
+            }
+            
+            // Remove duplicates and keep only unique files
+            recentFiles = [...new Set(recentFiles)];
+            
+            // If we have a target filename, try to find it
+            if (targetFileName) {
+                for (let filePath of recentFiles) {
+                    // Try multiple matching strategies
+                    let fileName = filePath.split('/').pop(); // Get just the filename
+                    
+                    // Strategy 1: Exact filename match
+                    if (fileName === targetFileName) {
+                        global.log("[" + UUID + "] Found exact filename match: " + filePath);
+                        return filePath;
+                    }
+                    
+                    // Strategy 2: Case-insensitive filename match
+                    if (fileName.toLowerCase() === targetFileName.toLowerCase()) {
+                        global.log("[" + UUID + "] Found case-insensitive filename match: " + filePath);
+                        return filePath;
+                    }
+                    
+                    // Strategy 3: Filename contains the target (for partial matches)
+                    if (fileName.includes(targetFileName) || targetFileName.includes(fileName)) {
+                        global.log("[" + UUID + "] Found partial filename match: " + filePath);
+                        return filePath;
+                    }
+                    
+                    // Strategy 4: Full path contains the target
+                    if (filePath.includes(targetFileName)) {
+                        global.log("[" + UUID + "] Found path containing target: " + filePath);
+                        return filePath;
+                    }
+                }
+                
+                global.log("[" + UUID + "] No matching document found for: " + targetFileName);
+            }
+            
+            // Return the most recent document (first in list)
+            if (recentFiles.length > 0) {
+                global.log("[" + UUID + "] Using most recent document: " + recentFiles[0]);
+                return recentFiles[0];
+            }
+            
+            global.log("[" + UUID + "] No recent documents found");
+            return null;
+            
+        } catch (e) {
+            global.log("[" + UUID + "] Error reading recent documents: " + e);
             return null;
         }
     },
