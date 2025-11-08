@@ -757,18 +757,11 @@ Terminal=false`;
             });
             global.log("[" + UUID + "] Restore keybinding set up: " + this.manualRestoreKeybinding);
         }
-        
-        // Temporary test keybinding for exclusion testing (Ctrl+Alt+T)
-        Main.keybindingManager.addHotKey(UUID + "-test-exclusion", "<Control><Alt>t", () => {
-            this._manualTestExclusion();
-        });
-        global.log("[" + UUID + "] Test exclusion keybinding set up: Ctrl+Alt+T");
     },
     
     _cleanupKeybindings: function() {
         Main.keybindingManager.removeHotKey(UUID + "-save");
         Main.keybindingManager.removeHotKey(UUID + "-restore");
-        Main.keybindingManager.removeHotKey(UUID + "-test-exclusion");
         global.log("[" + UUID + "] Keybindings cleaned up");
     },
     
@@ -1232,18 +1225,6 @@ Terminal=false`;
         
         // Restore the completion flag to previous state
         this._restorationCompleted = wasCompleted;
-    },
-    
-    // Manual test function for dynamic exclusion (for debugging)
-    _manualTestExclusion: function() {
-        global.log("[" + UUID + "] Manual exclusion test triggered");
-        
-        // Test the exclusion change handler with Terminator
-        let previousExcluded = "cinnamon-settings,cinnamon-killer-daemon,nemo-desktop";
-        let currentExcluded = "cinnamon-settings,cinnamon-killer-daemon,nemo-desktop,Terminator";
-        
-        global.log("[" + UUID + "] Testing exclusion change from '" + previousExcluded + "' to '" + currentExcluded + "'");
-        this._handleExclusionChanges(previousExcluded, currentExcluded);
     },
     
     _isApplicationRunning: function(appName) {
