@@ -723,6 +723,9 @@ Terminal=false`;
         let excludedAppsArray = this.excludedApps.split(',').map(app => app.trim().toLowerCase());
         let seenWindows = new Set(); // Track windows to avoid duplicates
         
+        global.log("[" + UUID + "] === WINDOW COLLECTION DEBUG ===");
+        global.log("[" + UUID + "] Total window actors available: " + windows.length);
+        global.log("[" + UUID + "] Excluded apps list: " + excludedAppsArray.join(', '));
         global.log("[" + UUID + "] Collecting session data from " + windows.length + " window actors");
         
         for (let windowActor of windows) {
@@ -858,6 +861,10 @@ Terminal=false`;
                       "' on workspace " + workspaceIndex);
         }
         
+        global.log("[" + UUID + "] === WINDOW COLLECTION SUMMARY ===");
+        global.log("[" + UUID + "] Started with " + windows.length + " window actors");
+        global.log("[" + UUID + "] Successfully collected " + sessionData.windows.length + " windows");
+        global.log("[" + UUID + "] Filtered out " + (windows.length - sessionData.windows.length) + " windows");
         global.log("[" + UUID + "] Session data collected: " + sessionData.windows.length + " windows, " + Object.keys(sessionData.workspaces).length + " workspaces");
         return sessionData;
     },
@@ -1128,7 +1135,7 @@ Terminal=false`;
         return count;
     },
     
-    _launchApplication: function(app) {
+    _launchApplication: function(app, windowData) {
         let launched = false;
         
         global.log("[" + UUID + "] Attempting to launch application: " + app);
@@ -1141,6 +1148,10 @@ Terminal=false`;
             'Terminator': ['terminator', '/usr/bin/terminator'],
             'Nemo': ['nemo', '/usr/bin/nemo'],
             'org.Nemo': ['nemo', '/usr/bin/nemo'],
+            'org.x.editor': ['xed', '/usr/bin/xed'],
+            'Xed': ['xed', '/usr/bin/xed'],
+            'io.missioncenter.MissionCenter': ['flatpak run io.missioncenter.MissionCenter', 'missioncenter'],
+            'missioncenter': ['flatpak run io.missioncenter.MissionCenter', 'missioncenter'],
             'Xlet-settings.py': ['cinnamon-settings extensions'],
             'gnome-terminal-server': ['gnome-terminal', '/usr/bin/gnome-terminal'],
             'thunderbird': ['thunderbird', '/usr/bin/thunderbird'],
@@ -1154,8 +1165,10 @@ Terminal=false`;
             'nautilus': ['nautilus', '/usr/bin/nautilus']
         };
         
+        let commands;
+        
         // Special handling for LibreOffice applications based on WM class
-        if (app === 'org.libreoffice' && windowData.wmClass) {
+        if (app === 'org.libreoffice' && windowData && windowData.wmClass) {
             let wmClass = windowData.wmClass.toLowerCase();
             if (wmClass === 'libreoffice-writer') {
                 commands = ['libreoffice --writer', '/usr/bin/libreoffice --writer'];
@@ -1479,7 +1492,7 @@ Terminal=false`;
         } else {
             // For other applications, use the general launch method
             global.log("[" + UUID + "] Using general launch method for: " + app);
-            launched = this._launchApplication(app);
+            launched = this._launchApplication(app, windowData);
             if (launched) {
                 global.log("[" + UUID + "] General launch successful for: " + app);
             } else {
