@@ -41,6 +41,13 @@
         "tooltip": "Comma-separated list of applications to exclude from session saving (case-insensitive partial matching)"
     },
 
+    "custom-app-mappings": {
+        "type": "entry",
+        "description": "Custom application mappings",
+        "default": "",
+        "tooltip": "Custom app-to-command mappings for applications that fail to restore. Format: 'AppName:command,AnotherApp:another-command'. Example: 'MyApp:flatpak run com.example.MyApp,CustomTool:/usr/local/bin/customtool'. To find app identifiers, run: cat ~/.cinnamon-session-save.json | jq '.windows[] | {app: .app, title: .title}'"
+    },
+
     "section-keybindings": {
         "type": "section",
         "description": "Keyboard Shortcuts"

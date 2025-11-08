@@ -46,6 +46,7 @@ SaveCinnamonSessionExtension.prototype = {
         this.autoRestoreOnLogin = true;
         this.restoreDelay = 5000; // 5 seconds delay before restoring
         this.excludedApps = "cinnamon-settings,cinnamon-killer-daemon,nemo-desktop";
+        this.customAppMappings = ""; // Custom app-to-command mappings
         this.manualSaveKeybinding = "<Super><Shift>s";
         this.manualRestoreKeybinding = "<Super><Shift>r";
         this.debugMode = true; // Enable debug mode by default for better troubleshooting
@@ -57,6 +58,7 @@ SaveCinnamonSessionExtension.prototype = {
             this.settings.bind("auto-restore-login", "autoRestoreOnLogin", this._onSettingsChanged);
             this.settings.bind("restore-delay", "restoreDelay", this._onSettingsChanged);
             this.settings.bind("excluded-apps", "excludedApps", this._onSettingsChanged);
+            this.settings.bind("custom-app-mappings", "customAppMappings", this._onSettingsChanged);
             this.settings.bind("manual-save-keybinding", "manualSaveKeybinding", this._onKeybindingChanged);
             this.settings.bind("manual-restore-keybinding", "manualRestoreKeybinding", this._onKeybindingChanged);
             this.settings.bind("debug-mode", "debugMode", this._onSettingsChanged);
@@ -401,7 +403,8 @@ fi`;
     _onSettingsChanged: function() {
         global.log("[" + UUID + "] Settings changed - auto-save: " + this.autoSaveOnLogout + 
                    ", auto-restore: " + this.autoRestoreOnLogin + ", delay: " + this.restoreDelay + "ms" +
-                   ", excluded-apps: '" + this.excludedApps + "'");
+                   ", excluded-apps: '" + this.excludedApps + "'" +
+                   ", custom-mappings: '" + this.customAppMappings + "'");
         
         // Check if excluded apps list has changed
         if (this._previousExcludedApps !== this.excludedApps) {
@@ -1293,6 +1296,44 @@ Terminal=false`;
         return count;
     },
     
+    _parseCustomAppMappings: function() {
+        let customMappings = {};
+        
+        if (!this.customAppMappings || this.customAppMappings.trim() === "") {
+            return customMappings;
+        }
+        
+        try {
+            // Parse format: "AppName:command,AnotherApp:another-command"
+            let mappingPairs = this.customAppMappings.split(',');
+            
+            for (let pair of mappingPairs) {
+                let trimmedPair = pair.trim();
+                if (trimmedPair === "") continue;
+                
+                let colonIndex = trimmedPair.indexOf(':');
+                if (colonIndex === -1) {
+                    global.log("[" + UUID + "] Invalid custom mapping format (missing colon): " + trimmedPair);
+                    continue;
+                }
+                
+                let appName = trimmedPair.substring(0, colonIndex).trim();
+                let command = trimmedPair.substring(colonIndex + 1).trim();
+                
+                if (appName && command) {
+                    customMappings[appName] = [command];
+                    global.log("[" + UUID + "] Added custom mapping: " + appName + " -> " + command);
+                } else {
+                    global.log("[" + UUID + "] Invalid custom mapping (empty app or command): " + trimmedPair);
+                }
+            }
+        } catch (e) {
+            global.log("[" + UUID + "] Error parsing custom app mappings: " + e);
+        }
+        
+        return customMappings;
+    },
+    
     _launchApplication: function(app, windowData) {
         let launched = false;
         
@@ -1322,6 +1363,14 @@ Terminal=false`;
             'gedit': ['gedit', '/usr/bin/gedit'],
             'nautilus': ['nautilus', '/usr/bin/nautilus']
         };
+        
+        // Merge custom app mappings with built-in mappings (custom mappings take priority)
+        let customMappings = this._parseCustomAppMappings();
+        Object.assign(appCommands, customMappings);
+        
+        if (Object.keys(customMappings).length > 0) {
+            global.log("[" + UUID + "] Using " + Object.keys(customMappings).length + " custom app mappings");
+        }
         
         let commands;
         
